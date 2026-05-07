@@ -28,8 +28,8 @@ PAIRS = [
 TIMEFRAME = "M5"
 CANDLE_COUNT = 100
 
-# Lowered from 85 to 75
-MIN_SCORE = 75
+# Lowered from 75 to 60
+MIN_SCORE = 60
 
 # =========================
 # RISK MANAGEMENT
