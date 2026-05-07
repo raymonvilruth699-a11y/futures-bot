@@ -32,8 +32,6 @@ TIMEFRAME = "M5"
 
 MIN_SCORE = 60
 
-cooldowns = {}
-
 # =========================
 # GET CHART DATA
 # =========================
@@ -92,11 +90,11 @@ def analyze_pair(pair):
 
     score = 0
 
-    # Trend strength
+    # Trend
     if trend != "NONE":
         score += 30
 
-    # RSI filter
+    # RSI confirmation
     if trend == "BUY" and latest["rsi"] > 55:
         score += 20
 
@@ -109,13 +107,13 @@ def analyze_pair(pair):
     if volatility > 0.0008:
         score += 20
 
-    # Session bonus
+    # Session strength
     hour = datetime.utcnow().hour
 
     if 7 <= hour <= 16:
         score += 15
 
-    # Whale/smart-money simulation
+    # Whale / smart money simulation
     if volatility > 0.0012:
         score += 15
 
@@ -134,7 +132,7 @@ def analyze_pair(pair):
 def send_alert(signal):
 
     message = f"""
-🚨 FOREX SIGNAL
+🚨 FOREX SIGNAL 🚨
 
 Pair: {signal['pair']}
 Direction: {signal['trend']}
@@ -173,19 +171,15 @@ while True:
 
             print(signal)
 
+            # ALERT EVERY QUALIFYING SIGNAL
             if signal["score"] >= MIN_SCORE:
 
-                last_trade = cooldowns.get(pair)
+                print("SENDING TELEGRAM ALERT...")
 
-                if not last_trade or time.time() - last_trade > 3600:
-
-                    print("SENDING TELEGRAM ALERT...")
-
-                    send_alert(signal)
-
-                    cooldowns[pair] = time.time()
+                send_alert(signal)
 
         except Exception as e:
+
             print("ERROR:", e)
 
     time.sleep(300)
