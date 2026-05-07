@@ -5,57 +5,31 @@ import ta
 import time
 from datetime import datetime
 
-# =========================
-# ENV VARIABLES
-# =========================
-
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
-OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# =========================
-# SETTINGS
-# =========================
-
-PAIRS = [
-    "EUR_USD",
-    "GBP_USD",
-    "USD_JPY",
-    "AUD_USD",
-    "USD_CAD",
-    "EUR_JPY",
-    "GBP_JPY"
-]
-
+PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "EUR_JPY", "GBP_JPY"]
 TIMEFRAME = "M5"
+MIN_SCORE = 85
 
-MIN_SCORE = 60
+active_trades = []
+wins = 0
+losses = 0
+paper_balance = 1000.00
 
-# =========================
-# GET CHART DATA
-# =========================
+def send_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
 
 def get_candles(pair):
-
     url = f"https://api-fxtrade.oanda.com/v3/instruments/{pair}/candles"
-
-    headers = {
-        "Authorization": f"Bearer {OANDA_API_KEY}"
-    }
-
-    params = {
-        "granularity": TIMEFRAME,
-        "count": 100,
-        "price": "M"
-    }
-
+    headers = {"Authorization": f"Bearer {OANDA_API_KEY}"}
+    params = {"granularity": TIMEFRAME, "count": 100, "price": "M"}
     r = requests.get(url, headers=headers, params=params)
-
     data = r.json()
 
     candles = []
-
     for c in data["candles"]:
         candles.append({
             "close": float(c["mid"]["c"]),
@@ -65,55 +39,40 @@ def get_candles(pair):
 
     return pd.DataFrame(candles)
 
-# =========================
-# ANALYSIS ENGINE
-# =========================
-
 def analyze_pair(pair):
-
     df = get_candles(pair)
 
     df["ema20"] = ta.trend.ema_indicator(df["close"], window=20)
     df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
-
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
     latest = df.iloc[-1]
-
     trend = "NONE"
 
     if latest["ema20"] > latest["ema50"]:
         trend = "BUY"
-
     elif latest["ema20"] < latest["ema50"]:
         trend = "SELL"
 
+    volatility = df["high"].iloc[-1] - df["low"].iloc[-1]
     score = 0
 
-    # Trend
     if trend != "NONE":
         score += 30
 
-    # RSI confirmation
     if trend == "BUY" and latest["rsi"] > 55:
         score += 20
 
     if trend == "SELL" and latest["rsi"] < 45:
         score += 20
 
-    # Volatility
-    volatility = df["high"].iloc[-1] - df["low"].iloc[-1]
-
     if volatility > 0.0008:
         score += 20
 
-    # Session strength
     hour = datetime.utcnow().hour
-
     if 7 <= hour <= 16:
         score += 15
 
-    # Whale / smart money simulation
     if volatility > 0.0012:
         score += 15
 
@@ -121,65 +80,171 @@ def analyze_pair(pair):
         "pair": pair,
         "trend": trend,
         "score": score,
+        "price": latest["close"],
         "rsi": round(latest["rsi"], 2),
         "volatility": round(volatility, 5)
     }
 
-# =========================
-# TELEGRAM ALERT
-# =========================
+def check_active_trades():
+    global wins, losses, paper_balance
 
-def send_alert(signal):
+    completed = []
 
-    message = f"""
-🚨 FOREX SIGNAL 🚨
+    for trade in active_trades:
+        df = get_candles(trade["pair"])
+        current_price = df.iloc[-1]["close"]
 
-Pair: {signal['pair']}
+        if trade["direction"] == "BUY":
+            if current_price >= trade["tp"]:
+                wins += 1
+                paper_balance += trade["profit"]
+                completed.append(trade)
+
+                send_message(f"""✅ PAPER TP HIT
+
+Pair: {trade['pair']}
+Direction: BUY
+Entry: {round(trade['entry'], 5)}
+Exit: {round(current_price, 5)}
+
+Result: WIN
+Profit: +${trade['profit']}
+
+Wins: {wins}
+Losses: {losses}
+Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
+Paper Balance: ${round(paper_balance, 2)}
+""")
+
+            elif current_price <= trade["sl"]:
+                losses += 1
+                paper_balance -= trade["risk"]
+                completed.append(trade)
+
+                send_message(f"""❌ PAPER SL HIT
+
+Pair: {trade['pair']}
+Direction: BUY
+Entry: {round(trade['entry'], 5)}
+Exit: {round(current_price, 5)}
+
+Result: LOSS
+Loss: -${trade['risk']}
+
+Wins: {wins}
+Losses: {losses}
+Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
+Paper Balance: ${round(paper_balance, 2)}
+""")
+
+        if trade["direction"] == "SELL":
+            if current_price <= trade["tp"]:
+                wins += 1
+                paper_balance += trade["profit"]
+                completed.append(trade)
+
+                send_message(f"""✅ PAPER TP HIT
+
+Pair: {trade['pair']}
+Direction: SELL
+Entry: {round(trade['entry'], 5)}
+Exit: {round(current_price, 5)}
+
+Result: WIN
+Profit: +${trade['profit']}
+
+Wins: {wins}
+Losses: {losses}
+Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
+Paper Balance: ${round(paper_balance, 2)}
+""")
+
+            elif current_price >= trade["sl"]:
+                losses += 1
+                paper_balance -= trade["risk"]
+                completed.append(trade)
+
+                send_message(f"""❌ PAPER SL HIT
+
+Pair: {trade['pair']}
+Direction: SELL
+Entry: {round(trade['entry'], 5)}
+Exit: {round(current_price, 5)}
+
+Result: LOSS
+Loss: -${trade['risk']}
+
+Wins: {wins}
+Losses: {losses}
+Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
+Paper Balance: ${round(paper_balance, 2)}
+""")
+
+    for trade in completed:
+        active_trades.remove(trade)
+
+send_message("🤖 Forex AI Paper Bot Started — Strict 85+ Score Mode")
+
+while True:
+    try:
+        print("Scanning forex market...")
+        check_active_trades()
+
+        for pair in PAIRS:
+            signal = analyze_pair(pair)
+            print(signal)
+
+            if signal["score"] >= MIN_SCORE and signal["trend"] != "NONE":
+                already_open = any(t["pair"] == pair for t in active_trades)
+
+                if already_open:
+                    continue
+
+                price = signal["price"]
+                risk = round(paper_balance * 0.01, 2)
+                profit = round(risk * 2, 2)
+
+                if signal["trend"] == "BUY":
+                    tp = price * 1.003
+                    sl = price * 0.997
+                else:
+                    tp = price * 0.997
+                    sl = price * 1.003
+
+                trade = {
+                    "pair": pair,
+                    "direction": signal["trend"],
+                    "entry": price,
+                    "tp": tp,
+                    "sl": sl,
+                    "risk": risk,
+                    "profit": profit
+                }
+
+                active_trades.append(trade)
+
+                send_message(f"""🚨 STRICT A+ PAPER TRADE
+
+Pair: {pair}
 Direction: {signal['trend']}
 Score: {signal['score']}
+
+Entry: {round(price, 5)}
+TP: {round(tp, 5)}
+SL: {round(sl, 5)}
 
 RSI: {signal['rsi']}
 Volatility: {signal['volatility']}
 
-📈 AI Setup Approved
-"""
+Risk: ${risk}
+Target Profit: ${profit}
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+Mode: PAPER TRADING ONLY
+""")
 
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
+        time.sleep(300)
 
-    response = requests.post(url, data=payload)
-
-    print("TELEGRAM STATUS:", response.text)
-
-# =========================
-# MAIN LOOP
-# =========================
-
-while True:
-
-    print("Scanning forex market...")
-
-    for pair in PAIRS:
-
-        try:
-
-            signal = analyze_pair(pair)
-
-            print(signal)
-
-            # ALERT EVERY QUALIFYING SIGNAL
-            if signal["score"] >= MIN_SCORE:
-
-                print("SENDING TELEGRAM ALERT...")
-
-                send_alert(signal)
-
-        except Exception as e:
-
-            print("ERROR:", e)
-
-    time.sleep(300)
+    except Exception as e:
+        print("ERROR:", e)
+        send_message(f"⚠️ BOT ERROR:\n{e}")
+        time.sleep(30)
