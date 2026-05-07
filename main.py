@@ -10,6 +10,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "EUR_JPY", "GBP_JPY"]
+
 TIMEFRAME = "M5"
 MIN_SCORE = 75
 
@@ -20,21 +21,37 @@ paper_balance = 1000.00
 
 def send_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+
+    response = requests.post(url, data=payload)
+    print("TELEGRAM STATUS:", response.text)
 
 def get_candles(pair):
     url = f"https://api-fxtrade.oanda.com/v3/instruments/{pair}/candles"
-    headers = {"Authorization": f"Bearer {OANDA_API_KEY}"}
-    params = {"granularity": TIMEFRAME, "count": 100, "price": "M"}
-    r = requests.get(url, headers=headers, params=params)
-    data = r.json()
+
+    headers = {
+        "Authorization": f"Bearer {OANDA_API_KEY}"
+    }
+
+    params = {
+        "granularity": TIMEFRAME,
+        "count": 100,
+        "price": "M"
+    }
+
+    response = requests.get(url, headers=headers, params=params)
+    data = response.json()
 
     candles = []
-    for c in data["candles"]:
+
+    for candle in data["candles"]:
         candles.append({
-            "close": float(c["mid"]["c"]),
-            "high": float(c["mid"]["h"]),
-            "low": float(c["mid"]["l"])
+            "close": float(candle["mid"]["c"]),
+            "high": float(candle["mid"]["h"]),
+            "low": float(candle["mid"]["l"])
         })
 
     return pd.DataFrame(candles)
@@ -47,6 +64,7 @@ def analyze_pair(pair):
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
     latest = df.iloc[-1]
+
     trend = "NONE"
 
     if latest["ema20"] > latest["ema50"]:
@@ -55,6 +73,7 @@ def analyze_pair(pair):
         trend = "SELL"
 
     volatility = df["high"].iloc[-1] - df["low"].iloc[-1]
+
     score = 0
 
     if trend != "NONE":
@@ -70,6 +89,7 @@ def analyze_pair(pair):
         score += 20
 
     hour = datetime.utcnow().hour
+
     if 7 <= hour <= 16:
         score += 15
 
@@ -86,7 +106,9 @@ def analyze_pair(pair):
     }
 
 def check_active_trades():
-    global wins, losses, paper_balance
+    global wins
+    global losses
+    global paper_balance
 
     completed = []
 
@@ -137,7 +159,7 @@ Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
 Paper Balance: ${round(paper_balance, 2)}
 """)
 
-        if trade["direction"] == "SELL":
+        elif trade["direction"] == "SELL":
             if current_price <= trade["tp"]:
                 wins += 1
                 paper_balance += trade["profit"]
@@ -183,24 +205,22 @@ Paper Balance: ${round(paper_balance, 2)}
     for trade in completed:
         active_trades.remove(trade)
 
-send_message("🤖 Forex AI Paper Bot Started — Strict 85+ Score Mode")
+send_message("🤖 Forex AI Paper Bot Started — 75+ Score Mode")
 
 while True:
     try:
         print("Scanning forex market...")
+
         check_active_trades()
 
         for pair in PAIRS:
             signal = analyze_pair(pair)
+
             print(signal)
 
             if signal["score"] >= MIN_SCORE and signal["trend"] != "NONE":
-                already_open = any(t["pair"] == pair for t in active_trades)
-
-                if already_open:
-                    continue
-
                 price = signal["price"]
+
                 risk = round(paper_balance * 0.01, 2)
                 profit = round(risk * 2, 2)
 
@@ -223,7 +243,7 @@ while True:
 
                 active_trades.append(trade)
 
-                send_message(f"""🚨 STRICT A+ PAPER TRADE
+                send_message(f"""🚨 A+ PAPER TRADE OPENED
 
 Pair: {pair}
 Direction: {signal['trend']}
