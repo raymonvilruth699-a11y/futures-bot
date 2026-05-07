@@ -21,32 +21,19 @@ paper_balance = 1000.00
 
 def send_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     response = requests.post(url, data=payload)
     print("TELEGRAM STATUS:", response.text)
 
 def get_candles(pair):
     url = f"https://api-fxtrade.oanda.com/v3/instruments/{pair}/candles"
-
-    headers = {
-        "Authorization": f"Bearer {OANDA_API_KEY}"
-    }
-
-    params = {
-        "granularity": TIMEFRAME,
-        "count": 100,
-        "price": "M"
-    }
+    headers = {"Authorization": f"Bearer {OANDA_API_KEY}"}
+    params = {"granularity": TIMEFRAME, "count": 100, "price": "M"}
 
     response = requests.get(url, headers=headers, params=params)
     data = response.json()
 
     candles = []
-
     for candle in data["candles"]:
         candles.append({
             "close": float(candle["mid"]["c"]),
@@ -64,7 +51,6 @@ def analyze_pair(pair):
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
     latest = df.iloc[-1]
-
     trend = "NONE"
 
     if latest["ema20"] > latest["ema50"]:
@@ -104,6 +90,35 @@ def analyze_pair(pair):
         "rsi": round(latest["rsi"], 2),
         "volatility": round(volatility, 5)
     }
+
+def send_trade_update(trade, current_price):
+    if trade["direction"] == "BUY":
+        progress = ((current_price - trade["entry"]) / (trade["tp"] - trade["entry"])) * 100
+    else:
+        progress = ((trade["entry"] - current_price) / (trade["entry"] - trade["tp"])) * 100
+
+    progress = round(progress, 2)
+
+    if progress > 0:
+        status = "Moving toward profit ✅"
+    elif progress < 0:
+        status = "Moving against entry ⚠️"
+    else:
+        status = "Still near entry"
+
+    send_message(f"""⏳ PAPER TRADE UPDATE
+
+Pair: {trade['pair']}
+Direction: {trade['direction']}
+
+Entry: {round(trade['entry'], 5)}
+Current: {round(current_price, 5)}
+TP: {round(trade['tp'], 5)}
+SL: {round(trade['sl'], 5)}
+
+Progress to TP: {progress}%
+Status: {status}
+""")
 
 def check_active_trades():
     global wins
@@ -159,6 +174,9 @@ Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
 Paper Balance: ${round(paper_balance, 2)}
 """)
 
+            else:
+                send_trade_update(trade, current_price)
+
         elif trade["direction"] == "SELL":
             if current_price <= trade["tp"]:
                 wins += 1
@@ -202,10 +220,13 @@ Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
 Paper Balance: ${round(paper_balance, 2)}
 """)
 
+            else:
+                send_trade_update(trade, current_price)
+
     for trade in completed:
         active_trades.remove(trade)
 
-send_message("🤖 Forex AI Paper Bot Started — 75+ Score Mode")
+send_message("🤖 Forex AI Paper Bot Started — 75+ Score Mode + Status Updates")
 
 while True:
     try:
@@ -215,7 +236,6 @@ while True:
 
         for pair in PAIRS:
             signal = analyze_pair(pair)
-
             print(signal)
 
             if signal["score"] >= MIN_SCORE and signal["trend"] != "NONE":
