@@ -30,7 +30,7 @@ PAIRS = [
 
 TIMEFRAME = "M5"
 
-MIN_SCORE = 55
+MIN_SCORE = 60
 
 cooldowns = {}
 
@@ -153,7 +153,9 @@ Volatility: {signal['volatility']}
         "text": message
     }
 
-    requests.post(url, data=payload)
+    response = requests.post(url, data=payload)
+
+    print("TELEGRAM STATUS:", response.text)
 
 # =========================
 # MAIN LOOP
@@ -176,6 +178,8 @@ while True:
                 last_trade = cooldowns.get(pair)
 
                 if not last_trade or time.time() - last_trade > 3600:
+
+                    print("SENDING TELEGRAM ALERT...")
 
                     send_alert(signal)
 
