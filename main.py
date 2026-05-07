@@ -30,7 +30,7 @@ PAIRS = [
 
 TIMEFRAME = "M5"
 
-MIN_SCORE = 80
+MIN_SCORE = 55
 
 cooldowns = {}
 
