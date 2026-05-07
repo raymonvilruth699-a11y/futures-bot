@@ -29,11 +29,16 @@ PAIRS = [
 TIMEFRAME = "M5"
 CANDLE_COUNT = 100
 
-MIN_SCORE = 50
+MIN_SCORE = 65
 
 STOP_LOSS_PERCENT = -20.0
+
+# Profit protection starts at +25%
 PROFIT_PROTECTION_TRIGGER = 25.0
-PROFIT_PROTECTION_EXIT = 15.0
+
+# Dynamic trailing lock:
+# highest profit - 10%
+TRAILING_PROFIT_GIVEBACK = 10.0
 
 MAX_ACTIVE_TRADES = 3
 MAX_SAME_CURRENCY_TRADES = 1
@@ -83,11 +88,6 @@ def get_candles(pair):
             "count": CANDLE_COUNT,
             "price": "M"
         }
-
-        print("TOKEN EXISTS:", bool(OANDA_API_KEY))
-        print("TOKEN START:", OANDA_API_KEY[:12] if OANDA_API_KEY else "NONE")
-        print("ACCOUNT EXISTS:", bool(OANDA_ACCOUNT_ID))
-        print("USING URL:", OANDA_URL)
 
         response = requests.get(
             url,
@@ -239,7 +239,8 @@ def open_paper_trade(pair, direction, entry_price, score):
         "status": "OPEN",
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "profit_protection": False,
-        "highest_progress": 0.0
+        "highest_progress": 0.0,
+        "protected_exit": None
     }
 
     send_telegram(f"""
@@ -252,8 +253,8 @@ Entry: {entry_price}
 Score: {score}
 
 🛑 Stop Loss: -20%
-🔒 Profit Protection: +25%
-🚪 Protected Exit: +15%
+🔒 Profit Protection Starts: +25%
+📈 Dynamic Lock: Highest Profit - 10%
 """)
 
 
@@ -278,6 +279,16 @@ def calculate_tp_progress(trade, current_price):
     return round(progress, 2)
 
 
+def calculate_protected_exit(highest_progress):
+    protected_exit = highest_progress - TRAILING_PROFIT_GIVEBACK
+
+    # Never protect below +15% once protection is active
+    if protected_exit < 15.0:
+        protected_exit = 15.0
+
+    return round(protected_exit, 2)
+
+
 # ==========================================
 # CLOSE TRADE
 # ==========================================
@@ -298,6 +309,9 @@ Entry: {trade['entry']}
 Exit: {current_price}
 
 Final Progress: {progress}%
+
+Highest Progress: {trade['highest_progress']}%
+Protected Exit: {trade.get('protected_exit')}
 
 Reason: {reason}
 """)
@@ -324,9 +338,11 @@ def manage_open_trades():
         current_price = float(df.iloc[-1]["close"])
         progress = calculate_tp_progress(trade, current_price)
 
+        # Update highest progress
         if progress > trade["highest_progress"]:
             trade["highest_progress"] = progress
 
+        # Stop loss
         if progress <= STOP_LOSS_PERCENT:
             close_trade(
                 pair,
@@ -336,8 +352,10 @@ def manage_open_trades():
             )
             continue
 
+        # Activate profit protection at +25%
         if progress >= PROFIT_PROTECTION_TRIGGER and not trade["profit_protection"]:
             trade["profit_protection"] = True
+            trade["protected_exit"] = calculate_protected_exit(trade["highest_progress"])
 
             send_telegram(f"""
 🔒 PROFIT PROTECTION ACTIVATED
@@ -347,16 +365,37 @@ Direction: {trade['direction']}
 
 Current Progress: {progress}%
 Highest Progress: {trade['highest_progress']}%
+Protected Exit: {trade['protected_exit']}%
 """)
 
-        if trade["profit_protection"] and progress <= PROFIT_PROTECTION_EXIT:
-            close_trade(
-                pair,
-                "🔒 PROFIT PROTECTED EXIT",
-                current_price,
-                progress
-            )
-            continue
+        # Dynamic trailing profit lock
+        if trade["profit_protection"]:
+            new_protected_exit = calculate_protected_exit(trade["highest_progress"])
+
+            if (
+                trade["protected_exit"] is None
+                or new_protected_exit > trade["protected_exit"]
+            ):
+                trade["protected_exit"] = new_protected_exit
+
+                send_telegram(f"""
+📈 TRAILING PROFIT LOCK MOVED UP
+
+Pair: {pair}
+Direction: {trade['direction']}
+
+Highest Progress: {trade['highest_progress']}%
+New Protected Exit: {trade['protected_exit']}%
+""")
+
+            if progress <= trade["protected_exit"]:
+                close_trade(
+                    pair,
+                    "🔒 DYNAMIC PROFIT PROTECTED EXIT",
+                    current_price,
+                    progress
+                )
+                continue
 
         status = (
             "Moving toward profit ✅"
@@ -373,10 +412,10 @@ Direction: {trade['direction']}
 Current Price: {current_price}
 
 TP Progress: {progress}%
-
 Highest Progress: {trade['highest_progress']}%
 
 Profit Protection: {trade['profit_protection']}
+Protected Exit: {trade.get('protected_exit')}
 
 {status}
 """)
@@ -442,8 +481,9 @@ Pairs:
 
 Risk Rules:
 🛑 Stop Loss: -20%
-🔒 Profit Protection: +25%
-🚪 Protected Exit: +15%
+🔒 Profit Protection Starts: +25%
+📈 Dynamic Profit Lock: Highest Profit - 10%
+🚪 Minimum Protected Exit: +15%
 
 Minimum Score: 65
 
