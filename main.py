@@ -1,706 +1,437 @@
 import os
-import json
 import time
 import requests
 import pandas as pd
-import ta
 from datetime import datetime, timezone
 
+# =========================
+# ENVIRONMENT VARIABLES
+# =========================
+
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # =========================
-# FOREX PAIRS
+# BOT SETTINGS
 # =========================
+
+PAPER_TRADING = True
 
 PAIRS = [
     "EUR_USD",
     "GBP_USD",
-    "AUD_USD",
-    "NZD_USD",
-    "USD_CAD",
     "USD_JPY",
-    "EUR_JPY",
     "GBP_JPY",
-    "EUR_GBP",
+    "EUR_JPY",
     "GBP_CAD",
-    "EUR_CAD"
+    "USD_CAD",
+    "AUD_USD",
+    "NZD_USD"
 ]
 
-# =========================
-# SETTINGS
-# =========================
-
 TIMEFRAME = "M5"
-MIN_SCORE = 75
-MAX_ACTIVE_TRADES = 3
-TRADE_EXPIRATION_HOURS = 4
-SL_COOLDOWN_SECONDS = 60 * 60
+CANDLE_COUNT = 100
 
-STATE_FILE = "bot_state.json"
+MIN_SCORE = 85
 
-# =========================
-# BOT STATE
-# =========================
+# New risk rules
+STOP_LOSS_PERCENT = -20.0
+PROFIT_PROTECTION_TRIGGER = 25.0
+PROFIT_PROTECTION_EXIT = 10.0
 
-active_trades = []
-cooldowns = {}
+SCAN_SECONDS = 300
+UPDATE_SECONDS = 300
 
-wins = 0
-losses = 0
-protected = 0
-expired = 0
+MAX_ACTIVE_TRADES = 5
+MAX_SAME_CURRENCY_TRADES = 1
 
-paper_balance = 1000.00
+OANDA_URL = "https://api-fxpractice.oanda.com/v3"
 
-last_daily_summary_date = None
-
-# =========================
-# SAVE STATE
-# =========================
-
-def save_state():
-
-    state = {
-        "active_trades": active_trades,
-        "cooldowns": cooldowns,
-        "wins": wins,
-        "losses": losses,
-        "protected": protected,
-        "expired": expired,
-        "paper_balance": paper_balance,
-        "last_daily_summary_date": last_daily_summary_date
-    }
-
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+HEADERS = {
+    "Authorization": f"Bearer {OANDA_API_KEY}",
+    "Content-Type": "application/json"
+}
 
 # =========================
-# LOAD STATE
+# ACTIVE PAPER TRADES
 # =========================
 
-def load_state():
+active_trades = {}
 
-    global active_trades
-    global cooldowns
-    global wins
-    global losses
-    global protected
-    global expired
-    global paper_balance
-    global last_daily_summary_date
-
-    try:
-
-        with open(STATE_FILE, "r") as f:
-            state = json.load(f)
-
-        active_trades = state.get("active_trades", [])
-        cooldowns = state.get("cooldowns", {})
-
-        wins = state.get("wins", 0)
-        losses = state.get("losses", 0)
-        protected = state.get("protected", 0)
-        expired = state.get("expired", 0)
-
-        paper_balance = state.get("paper_balance", 1000.00)
-
-        last_daily_summary_date = state.get(
-            "last_daily_summary_date"
-        )
-
-    except:
-        save_state()
 
 # =========================
 # TELEGRAM
 # =========================
 
-def send_message(message):
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram not configured.")
+        return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message
+        }
+        requests.post(url, data=payload, timeout=10)
+    except Exception as e:
+        print("Telegram error:", e)
 
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-
-    response = requests.post(url, data=payload)
-
-    print(response.text)
 
 # =========================
-# MARKET DATA
+# OANDA DATA
 # =========================
 
 def get_candles(pair):
+    try:
+        url = f"{OANDA_URL}/instruments/{pair}/candles"
+        params = {
+            "granularity": TIMEFRAME,
+            "count": CANDLE_COUNT,
+            "price": "M"
+        }
 
-    url = f"https://api-fxtrade.oanda.com/v3/instruments/{pair}/candles"
+        response = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        data = response.json()
 
-    headers = {
-        "Authorization": f"Bearer {OANDA_API_KEY}"
-    }
+        candles = []
 
-    params = {
-        "granularity": TIMEFRAME,
-        "count": 100,
-        "price": "M"
-    }
+        for candle in data.get("candles", []):
+            if candle.get("complete"):
+                candles.append({
+                    "time": candle["time"],
+                    "open": float(candle["mid"]["o"]),
+                    "high": float(candle["mid"]["h"]),
+                    "low": float(candle["mid"]["l"]),
+                    "close": float(candle["mid"]["c"]),
+                    "volume": int(candle["volume"])
+                })
 
-    response = requests.get(
-        url,
-        headers=headers,
-        params=params
-    )
+        return pd.DataFrame(candles)
 
-    data = response.json()
+    except Exception as e:
+        print(f"Error getting candles for {pair}:", e)
+        return pd.DataFrame()
 
-    candles = []
-
-    for candle in data["candles"]:
-
-        candles.append({
-            "close": float(candle["mid"]["c"]),
-            "high": float(candle["mid"]["h"]),
-            "low": float(candle["mid"]["l"])
-        })
-
-    return pd.DataFrame(candles)
 
 # =========================
-# ANALYSIS
+# INDICATORS
 # =========================
 
-def analyze_pair(pair):
+def add_indicators(df):
+    df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
+    df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
 
-    df = get_candles(pair)
+    df["avg_volume"] = df["volume"].rolling(20).mean()
+    df["volume_spike"] = df["volume"] > df["avg_volume"] * 1.25
 
-    df["ema20"] = ta.trend.ema_indicator(
-        df["close"],
-        window=20
-    )
+    df["candle_body"] = abs(df["close"] - df["open"])
+    df["range"] = df["high"] - df["low"]
+    df["strong_candle"] = df["candle_body"] > df["range"] * 0.55
 
-    df["ema50"] = ta.trend.ema_indicator(
-        df["close"],
-        window=50
-    )
+    return df
 
-    df["rsi"] = ta.momentum.rsi(
-        df["close"],
-        window=14
-    )
 
-    latest = df.iloc[-1]
+# =========================
+# SIGNAL SCORING
+# =========================
 
-    trend = "NONE"
+def score_trade(df, pair):
+    if df.empty or len(df) < 60:
+        return None, 0
 
-    if latest["ema20"] > latest["ema50"]:
-        trend = "BUY"
-
-    elif latest["ema20"] < latest["ema50"]:
-        trend = "SELL"
-
-    volatility = (
-        df["high"].iloc[-1]
-        -
-        df["low"].iloc[-1]
-    )
+    df = add_indicators(df)
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
     score = 0
+    direction = None
 
-    if trend != "NONE":
-        score += 30
+    bullish = (
+        last["ema9"] > last["ema21"]
+        and last["close"] > last["ema50"]
+        and last["close"] > prev["close"]
+    )
 
-    if trend == "BUY" and latest["rsi"] > 55:
+    bearish = (
+        last["ema9"] < last["ema21"]
+        and last["close"] < last["ema50"]
+        and last["close"] < prev["close"]
+    )
+
+    if bullish:
+        direction = "BUY"
+        score += 35
+
+    if bearish:
+        direction = "SELL"
+        score += 35
+
+    if last["volume_spike"]:
+        score += 25
+
+    if last["strong_candle"]:
         score += 20
 
-    if trend == "SELL" and latest["rsi"] < 45:
-        score += 20
-
-    if volatility > 0.0008:
-        score += 20
-
-    hour = datetime.utcnow().hour
-
-    if 7 <= hour <= 16:
+    if abs(last["ema9"] - last["ema21"]) > abs(prev["ema9"] - prev["ema21"]):
         score += 15
 
-    if volatility > 0.0012:
-        score += 15
+    # JPY pairs have been cleaner for your bot
+    if "JPY" in pair:
+        score += 5
 
-    return {
+    return direction, score
+
+
+# =========================
+# CORRELATION FILTER
+# =========================
+
+def currencies_in_pair(pair):
+    return pair.split("_")
+
+
+def can_open_trade(pair):
+    if pair in active_trades:
+        return False
+
+    if len(active_trades) >= MAX_ACTIVE_TRADES:
+        return False
+
+    new_currencies = currencies_in_pair(pair)
+
+    for active_pair in active_trades.keys():
+        active_currencies = currencies_in_pair(active_pair)
+
+        for currency in new_currencies:
+            if currency in active_currencies:
+                count = sum(
+                    currency in currencies_in_pair(p)
+                    for p in active_trades.keys()
+                )
+
+                if count >= MAX_SAME_CURRENCY_TRADES:
+                    return False
+
+    return True
+
+
+# =========================
+# PAPER TRADE OPEN
+# =========================
+
+def open_paper_trade(pair, direction, entry_price, score):
+    active_trades[pair] = {
         "pair": pair,
-        "trend": trend,
+        "direction": direction,
+        "entry": entry_price,
         "score": score,
-        "price": float(latest["close"]),
-        "rsi": round(float(latest["rsi"]), 2),
-        "volatility": round(float(volatility), 5)
+        "status": "OPEN",
+        "opened_at": datetime.now(timezone.utc).isoformat(),
+        "profit_protection": False,
+        "highest_progress": 0.0
     }
 
+    message = f"""
+🚀 PAPER TRADE OPENED
+
+Pair: {pair}
+Direction: {direction}
+Entry: {entry_price}
+Score: {score}
+
+Stop Loss: -20%
+Profit Protection: activates at +25%
+"""
+    send_telegram(message)
+
+
 # =========================
-# JPY FILTER
+# TP PROGRESS CALCULATION
 # =========================
 
-def has_active_jpy_trade():
+def calculate_tp_progress(trade, current_price):
+    entry = trade["entry"]
+    direction = trade["direction"]
 
-    for trade in active_trades:
-
-        if "JPY" in trade["pair"]:
-            return True
-
-    return False
-
-# =========================
-# PROGRESS
-# =========================
-
-def calculate_progress(trade, current_price):
-
-    if trade["direction"] == "BUY":
-
-        return (
-            (
-                current_price - trade["entry"]
-            )
-            /
-            (
-                trade["tp"] - trade["entry"]
-            )
-        ) * 100
-
+    # Estimated TP distance for paper tracking
+    if "JPY" in trade["pair"]:
+        target_distance = 0.30
     else:
+        target_distance = 0.0030
 
-        return (
-            (
-                trade["entry"] - current_price
-            )
-            /
-            (
-                trade["entry"] - trade["tp"]
-            )
-        ) * 100
-
-# =========================
-# PROFIT PROTECTION
-# =========================
-
-def protect_trade(trade, current_price, progress):
-
-    # BREAK EVEN
-
-    if progress >= 25 and not trade["break_even"]:
-
-        trade["sl"] = trade["entry"]
-
-        trade["break_even"] = True
-
-        send_message(
-            f"🛡️ BREAK-EVEN ACTIVE\n\n"
-            f"{trade['pair']}\n"
-            f"SL moved to entry."
-        )
-
-    # TRAILING STOP
-
-    if progress >= 40:
-
-        if trade["direction"] == "BUY":
-
-            new_sl = (
-                current_price
-                -
-                (
-                    (trade["tp"] - trade["entry"])
-                    * 0.25
-                )
-            )
-
-            if new_sl > trade["sl"]:
-
-                trade["sl"] = new_sl
-
-        else:
-
-            new_sl = (
-                current_price
-                +
-                (
-                    (trade["entry"] - trade["tp"])
-                    * 0.25
-                )
-            )
-
-            if new_sl < trade["sl"]:
-
-                trade["sl"] = new_sl
-
-# =========================
-# TRADE UPDATES
-# =========================
-
-def send_trade_update(trade, current_price, progress):
-
-    if progress > 0:
-        status = "Moving toward profit ✅"
+    if direction == "BUY":
+        progress = ((current_price - entry) / target_distance) * 100
     else:
-        status = "Moving against entry ⚠️"
+        progress = ((entry - current_price) / target_distance) * 100
 
-    send_message(
-        f"⏳ PAPER TRADE UPDATE\n\n"
-        f"Pair: {trade['pair']}\n"
-        f"Direction: {trade['direction']}\n\n"
-        f"Current: {round(current_price,5)}\n"
-        f"TP Progress: {round(progress,2)}%\n\n"
-        f"{status}"
-    )
+    return round(progress, 2)
+
 
 # =========================
 # CLOSE TRADE
 # =========================
 
-def close_trade_result(
-    trade,
-    current_price,
-    result_type
-):
+def close_trade(pair, reason, current_price, progress):
+    trade = active_trades.get(pair)
 
-    global wins
-    global losses
-    global protected
-    global expired
-    global paper_balance
+    if not trade:
+        return
 
-    if result_type == "WIN":
+    message = f"""
+✅ PAPER TRADE CLOSED
 
-        wins += 1
+Pair: {pair}
+Direction: {trade['direction']}
+Entry: {trade['entry']}
+Exit: {current_price}
+Final TP Progress: {progress}%
 
-        paper_balance += trade["profit"]
+Reason: {reason}
+"""
+    send_telegram(message)
 
-        title = "✅ PAPER TP HIT"
+    del active_trades[pair]
 
-    elif result_type == "LOSS":
-
-        losses += 1
-
-        paper_balance -= trade["risk"]
-
-        cooldowns[trade["pair"]] = time.time()
-
-        title = "❌ PAPER SL HIT"
-
-    elif result_type == "PROTECTED":
-
-        protected += 1
-
-        title = "🟨 PROTECTED EXIT"
-
-    else:
-
-        expired += 1
-
-        title = "⏰ TRADE EXPIRED"
-
-    send_message(
-        f"{title}\n\n"
-        f"{trade['pair']}\n"
-        f"{trade['direction']}\n\n"
-        f"Balance: ${round(paper_balance,2)}"
-    )
-
-    save_state()
 
 # =========================
-# ACTIVE TRADE CHECKER
+# PAPER TRADE MANAGER
 # =========================
 
-def check_active_trades():
+def manage_open_trades():
+    if not active_trades:
+        return
 
-    completed = []
+    for pair in list(active_trades.keys()):
+        trade = active_trades[pair]
 
-    now = time.time()
-
-    for trade in active_trades:
-
-        df = get_candles(trade["pair"])
-
-        current_price = float(
-            df.iloc[-1]["close"]
-        )
-
-        progress = calculate_progress(
-            trade,
-            current_price
-        )
-
-        protect_trade(
-            trade,
-            current_price,
-            progress
-        )
-
-        trade_age = (
-            now - trade["opened_at"]
-        ) / 3600
-
-        if trade_age >= TRADE_EXPIRATION_HOURS:
-
-            close_trade_result(
-                trade,
-                current_price,
-                "EXPIRED"
-            )
-
-            completed.append(trade)
-
+        df = get_candles(pair)
+        if df.empty:
             continue
 
-        if trade["direction"] == "BUY":
+        current_price = float(df.iloc[-1]["close"])
+        progress = calculate_tp_progress(trade, current_price)
 
-            if current_price >= trade["tp"]:
+        if progress > trade["highest_progress"]:
+            trade["highest_progress"] = progress
 
-                close_trade_result(
-                    trade,
-                    current_price,
-                    "WIN"
-                )
+        # HARD STOP LOSS AT -20%
+        if progress <= STOP_LOSS_PERCENT:
+            close_trade(
+                pair,
+                "🛑 STOP LOSS HIT at -20%",
+                current_price,
+                progress
+            )
+            continue
 
-                completed.append(trade)
+        # ACTIVATE PROFIT PROTECTION AT +25%
+        if progress >= PROFIT_PROTECTION_TRIGGER and not trade["profit_protection"]:
+            trade["profit_protection"] = True
 
-            elif current_price <= trade["sl"]:
+            send_telegram(f"""
+🔒 PROFIT PROTECTION ACTIVATED
 
-                if trade["break_even"]:
+Pair: {pair}
+Direction: {trade['direction']}
+Current: {current_price}
+TP Progress: {progress}%
 
-                    close_trade_result(
-                        trade,
-                        current_price,
-                        "PROTECTED"
-                    )
+Trade is now protected.
+""")
 
-                else:
+        # PROTECTED EXIT
+        if trade["profit_protection"] and progress <= PROFIT_PROTECTION_EXIT:
+            close_trade(
+                pair,
+                "🔒 PROFIT PROTECTED EXIT",
+                current_price,
+                progress
+            )
+            continue
 
-                    close_trade_result(
-                        trade,
-                        current_price,
-                        "LOSS"
-                    )
+        # NORMAL UPDATE
+        status = "Moving toward profit ✅" if progress > 0 else "Moving against entry ⚠️"
 
-                completed.append(trade)
+        send_telegram(f"""
+⏳ PAPER TRADE UPDATE
 
-            else:
+Pair: {pair}
+Direction: {trade['direction']}
 
-                send_trade_update(
-                    trade,
-                    current_price,
-                    progress
-                )
+Current: {current_price}
+TP Progress: {progress}%
 
-        else:
+Profit Protection: {trade['profit_protection']}
+Highest Progress: {trade['highest_progress']}%
 
-            if current_price <= trade["tp"]:
+{status}
+""")
 
-                close_trade_result(
-                    trade,
-                    current_price,
-                    "WIN"
-                )
-
-                completed.append(trade)
-
-            elif current_price >= trade["sl"]:
-
-                if trade["break_even"]:
-
-                    close_trade_result(
-                        trade,
-                        current_price,
-                        "PROTECTED"
-                    )
-
-                else:
-
-                    close_trade_result(
-                        trade,
-                        current_price,
-                        "LOSS"
-                    )
-
-                completed.append(trade)
-
-            else:
-
-                send_trade_update(
-                    trade,
-                    current_price,
-                    progress
-                )
-
-    for trade in completed:
-        active_trades.remove(trade)
-
-    if completed:
-        save_state()
 
 # =========================
-# DAILY SUMMARY
+# SCAN FOR NEW TRADES
 # =========================
 
-def send_daily_summary():
+def scan_market():
+    for pair in PAIRS:
+        if not can_open_trade(pair):
+            continue
 
-    global last_daily_summary_date
+        df = get_candles(pair)
+        if df.empty:
+            continue
 
-    today = datetime.now(
-        timezone.utc
-    ).strftime("%Y-%m-%d")
+        direction, score = score_trade(df, pair)
 
-    hour = datetime.utcnow().hour
+        if direction and score >= MIN_SCORE:
+            entry_price = float(df.iloc[-1]["close"])
+            open_paper_trade(pair, direction, entry_price, score)
 
-    if last_daily_summary_date == today:
-        return
-
-    if hour != 21:
-        return
-
-    send_message(
-        f"📊 DAILY SUMMARY\n\n"
-        f"Wins: {wins}\n"
-        f"Losses: {losses}\n"
-        f"Protected: {protected}\n"
-        f"Expired: {expired}\n\n"
-        f"Balance: ${round(paper_balance,2)}"
-    )
-
-    last_daily_summary_date = today
-
-    save_state()
 
 # =========================
-# OPEN TRADE
+# MAIN LOOP
 # =========================
 
-def open_trade(signal):
+def main():
+    send_telegram("""
+🤖 FOREX BOT STARTED
 
-    pair = signal["pair"]
+Mode: PAPER TRADING
+Pairs: Forex majors + JPY pairs
 
-    # ONLY ONE JPY TRADE AT A TIME
-    if "JPY" in pair and has_active_jpy_trade():
+Risk Rules:
+🛑 Stop Loss: -20%
+🔒 Profit Protection: +25%
+🚪 Protected Exit: +10%
 
-        print(f"Blocked extra JPY trade: {pair}")
+Bot is now scanning.
+""")
 
-        return
+    last_update = 0
 
-    if len(active_trades) >= MAX_ACTIVE_TRADES:
-        return
+    while True:
+        try:
+            print("Scanning market...")
+            scan_market()
 
-    if (
-        pair in cooldowns
-        and
-        time.time() - cooldowns[pair]
-        < SL_COOLDOWN_SECONDS
-    ):
-        return
+            now = time.time()
 
-    already_open = any(
-        trade["pair"] == pair
-        for trade in active_trades
-    )
+            if now - last_update >= UPDATE_SECONDS:
+                manage_open_trades()
+                last_update = now
 
-    if already_open:
-        return
+            time.sleep(SCAN_SECONDS)
 
-    price = signal["price"]
+        except Exception as e:
+            print("Main loop error:", e)
+            send_telegram(f"⚠️ BOT ERROR: {e}")
+            time.sleep(60)
 
-    risk = round(
-        paper_balance * 0.01,
-        2
-    )
 
-    profit = round(
-        risk * 2,
-        2
-    )
-
-    if signal["trend"] == "BUY":
-
-        tp = price * 1.003
-        sl = price * 0.997
-
-    else:
-
-        tp = price * 0.997
-        sl = price * 1.003
-
-    trade = {
-        "pair": pair,
-        "direction": signal["trend"],
-        "entry": price,
-        "tp": tp,
-        "sl": sl,
-        "risk": risk,
-        "profit": profit,
-        "break_even": False,
-        "opened_at": time.time()
-    }
-
-    active_trades.append(trade)
-
-    save_state()
-
-    send_message(
-        f"🚨 A+ PAPER TRADE OPENED\n\n"
-        f"Pair: {pair}\n"
-        f"Direction: {signal['trend']}\n"
-        f"Score: {signal['score']}\n\n"
-        f"Entry: {round(price,5)}\n"
-        f"TP: {round(tp,5)}\n"
-        f"SL: {round(sl,5)}\n\n"
-        f"Risk: ${risk}\n"
-        f"Target Profit: ${profit}\n\n"
-        f"Mode: PAPER TRADING ONLY"
-    )
-
-# =========================
-# START BOT
-# =========================
-
-load_state()
-
-send_message(
-    "🤖 Forex AI Paper Bot Started — JPY Protection Mode"
-)
-
-while True:
-
-    try:
-
-        print("Scanning forex market...")
-
-        check_active_trades()
-
-        send_daily_summary()
-
-        for pair in PAIRS:
-
-            signal = analyze_pair(pair)
-
-            print(signal)
-
-            if (
-                signal["score"] >= MIN_SCORE
-                and
-                signal["trend"] != "NONE"
-            ):
-
-                open_trade(signal)
-
-        time.sleep(300)
-
-    except Exception as e:
-
-        print("ERROR:", e)
-
-        send_message(
-            f"⚠️ BOT ERROR:\n{e}"
-        )
-
-        time.sleep(30)
+if __name__ == "__main__":
+    main()
