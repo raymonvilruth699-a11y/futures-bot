@@ -11,7 +11,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "EUR_JPY", "GBP_JPY"]
 TIMEFRAME = "M5"
-MIN_SCORE = 85
+MIN_SCORE = 75
 
 active_trades = []
 wins = 0
