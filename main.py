@@ -1,29 +1,86 @@
 import os
+import json
+import time
 import requests
 import pandas as pd
 import ta
-import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "EUR_JPY", "GBP_JPY"]
+PAIRS = [
+    "EUR_USD",
+    "GBP_USD",
+    "AUD_USD",
+    "NZD_USD",
+    "USD_CAD",
+    "USD_JPY",
+    "EUR_JPY",
+    "GBP_JPY",
+    "EUR_GBP",
+    "GBP_CAD",
+    "EUR_CAD"
+]
 
 TIMEFRAME = "M5"
 MIN_SCORE = 75
+MAX_ACTIVE_TRADES = 3
+TRADE_EXPIRATION_HOURS = 4
+SL_COOLDOWN_SECONDS = 60 * 60
+STATE_FILE = "bot_state.json"
 
 active_trades = []
+cooldowns = {}
 wins = 0
 losses = 0
+protected = 0
+expired = 0
 paper_balance = 1000.00
+last_daily_summary_date = None
+
+
+def save_state():
+    state = {
+        "active_trades": active_trades,
+        "cooldowns": cooldowns,
+        "wins": wins,
+        "losses": losses,
+        "protected": protected,
+        "expired": expired,
+        "paper_balance": paper_balance,
+        "last_daily_summary_date": last_daily_summary_date
+    }
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+def load_state():
+    global active_trades, cooldowns, wins, losses, protected, expired, paper_balance, last_daily_summary_date
+    try:
+        with open(STATE_FILE, "r") as f:
+            state = json.load(f)
+
+        active_trades = state.get("active_trades", [])
+        cooldowns = state.get("cooldowns", {})
+        wins = state.get("wins", 0)
+        losses = state.get("losses", 0)
+        protected = state.get("protected", 0)
+        expired = state.get("expired", 0)
+        paper_balance = state.get("paper_balance", 1000.00)
+        last_daily_summary_date = state.get("last_daily_summary_date")
+
+    except FileNotFoundError:
+        save_state()
+
 
 def send_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     response = requests.post(url, data=payload)
     print("TELEGRAM STATUS:", response.text)
+
 
 def get_candles(pair):
     url = f"https://api-fxtrade.oanda.com/v3/instruments/{pair}/candles"
@@ -43,6 +100,7 @@ def get_candles(pair):
 
     return pd.DataFrame(candles)
 
+
 def analyze_pair(pair):
     df = get_candles(pair)
 
@@ -51,8 +109,8 @@ def analyze_pair(pair):
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
     latest = df.iloc[-1]
-    trend = "NONE"
 
+    trend = "NONE"
     if latest["ema20"] > latest["ema50"]:
         trend = "BUY"
     elif latest["ema20"] < latest["ema50"]:
@@ -75,7 +133,6 @@ def analyze_pair(pair):
         score += 20
 
     hour = datetime.utcnow().hour
-
     if 7 <= hour <= 16:
         score += 15
 
@@ -86,19 +143,68 @@ def analyze_pair(pair):
         "pair": pair,
         "trend": trend,
         "score": score,
-        "price": latest["close"],
-        "rsi": round(latest["rsi"], 2),
-        "volatility": round(volatility, 5)
+        "price": float(latest["close"]),
+        "rsi": round(float(latest["rsi"]), 2),
+        "volatility": round(float(volatility), 5)
     }
 
-def send_trade_update(trade, current_price):
+
+def calculate_progress(trade, current_price):
     if trade["direction"] == "BUY":
-        progress = ((current_price - trade["entry"]) / (trade["tp"] - trade["entry"])) * 100
-    else:
-        progress = ((trade["entry"] - current_price) / (trade["entry"] - trade["tp"])) * 100
+        return ((current_price - trade["entry"]) / (trade["tp"] - trade["entry"])) * 100
 
-    progress = round(progress, 2)
+    return ((trade["entry"] - current_price) / (trade["entry"] - trade["tp"])) * 100
 
+
+def protect_trade(trade, current_price, progress):
+    if progress >= 25 and not trade["break_even"]:
+        trade["sl"] = trade["entry"]
+        trade["break_even"] = True
+
+        send_message(f"""🛡️ BREAK-EVEN PROTECTION ACTIVE
+
+Pair: {trade['pair']}
+Direction: {trade['direction']}
+
+Entry: {round(trade['entry'], 5)}
+New SL: {round(trade['sl'], 5)}
+
+Trade is now protected from full loss.
+""")
+
+    if progress >= 40:
+        if trade["direction"] == "BUY":
+            new_sl = current_price - ((trade["tp"] - trade["entry"]) * 0.25)
+
+            if new_sl > trade["sl"]:
+                trade["sl"] = new_sl
+                send_message(f"""🔒 TRAILING STOP UPDATED
+
+Pair: {trade['pair']}
+Direction: BUY
+
+Current: {round(current_price, 5)}
+New SL: {round(trade['sl'], 5)}
+Progress to TP: {round(progress, 2)}%
+""")
+
+        else:
+            new_sl = current_price + ((trade["entry"] - trade["tp"]) * 0.25)
+
+            if new_sl < trade["sl"]:
+                trade["sl"] = new_sl
+                send_message(f"""🔒 TRAILING STOP UPDATED
+
+Pair: {trade['pair']}
+Direction: SELL
+
+Current: {round(current_price, 5)}
+New SL: {round(trade['sl'], 5)}
+Progress to TP: {round(progress, 2)}%
+""")
+
+
+def send_trade_update(trade, current_price, progress):
     if progress > 0:
         status = "Moving toward profit ✅"
     elif progress < 0:
@@ -116,154 +222,196 @@ Current: {round(current_price, 5)}
 TP: {round(trade['tp'], 5)}
 SL: {round(trade['sl'], 5)}
 
-Progress to TP: {progress}%
+Progress to TP: {round(progress, 2)}%
 Status: {status}
+Break Even Active: {trade['break_even']}
 """)
 
-def check_active_trades():
-    global wins
-    global losses
-    global paper_balance
 
+def close_trade_result(trade, current_price, result_type):
+    global wins, losses, protected, expired, paper_balance
+
+    if result_type == "WIN":
+        wins += 1
+        paper_balance += trade["profit"]
+        title = "✅ PAPER TP HIT"
+        amount_line = f"Profit: +${trade['profit']}"
+
+    elif result_type == "LOSS":
+        losses += 1
+        paper_balance -= trade["risk"]
+        cooldowns[trade["pair"]] = time.time()
+        title = "❌ PAPER SL HIT"
+        amount_line = f"Loss: -${trade['risk']}"
+
+    elif result_type == "PROTECTED":
+        protected += 1
+        title = "🟨 PAPER TRADE CLOSED PROTECTED"
+        amount_line = "Result: Break-even / protected exit"
+
+    else:
+        expired += 1
+        title = "⏰ PAPER TRADE EXPIRED"
+        amount_line = "Result: Closed by 4-hour time limit"
+
+    total = wins + losses + protected + expired
+    win_rate = round((wins / max(wins + losses, 1)) * 100, 2)
+
+    send_message(f"""{title}
+
+Pair: {trade['pair']}
+Direction: {trade['direction']}
+
+Entry: {round(trade['entry'], 5)}
+Exit: {round(current_price, 5)}
+
+{amount_line}
+
+Wins: {wins}
+Losses: {losses}
+Protected: {protected}
+Expired: {expired}
+Win Rate: {win_rate}%
+Paper Balance: ${round(paper_balance, 2)}
+Total Closed: {total}
+""")
+
+    save_state()
+
+
+def check_active_trades():
     completed = []
+    now = time.time()
 
     for trade in active_trades:
         df = get_candles(trade["pair"])
-        current_price = df.iloc[-1]["close"]
+        current_price = float(df.iloc[-1]["close"])
+        progress = calculate_progress(trade, current_price)
+
+        protect_trade(trade, current_price, progress)
+
+        trade_age_hours = (now - trade["opened_at"]) / 3600
+
+        if trade_age_hours >= TRADE_EXPIRATION_HOURS:
+            close_trade_result(trade, current_price, "EXPIRED")
+            completed.append(trade)
+            continue
 
         if trade["direction"] == "BUY":
             if current_price >= trade["tp"]:
-                wins += 1
-                paper_balance += trade["profit"]
+                close_trade_result(trade, current_price, "WIN")
                 completed.append(trade)
-
-                send_message(f"""✅ PAPER TP HIT
-
-Pair: {trade['pair']}
-Direction: BUY
-Entry: {round(trade['entry'], 5)}
-Exit: {round(current_price, 5)}
-
-Result: WIN
-Profit: +${trade['profit']}
-
-Wins: {wins}
-Losses: {losses}
-Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
-Paper Balance: ${round(paper_balance, 2)}
-""")
 
             elif current_price <= trade["sl"]:
-                losses += 1
-                paper_balance -= trade["risk"]
+                if trade["break_even"]:
+                    close_trade_result(trade, current_price, "PROTECTED")
+                else:
+                    close_trade_result(trade, current_price, "LOSS")
                 completed.append(trade)
-
-                send_message(f"""❌ PAPER SL HIT
-
-Pair: {trade['pair']}
-Direction: BUY
-Entry: {round(trade['entry'], 5)}
-Exit: {round(current_price, 5)}
-
-Result: LOSS
-Loss: -${trade['risk']}
-
-Wins: {wins}
-Losses: {losses}
-Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
-Paper Balance: ${round(paper_balance, 2)}
-""")
 
             else:
-                send_trade_update(trade, current_price)
+                send_trade_update(trade, current_price, progress)
 
-        elif trade["direction"] == "SELL":
+        else:
             if current_price <= trade["tp"]:
-                wins += 1
-                paper_balance += trade["profit"]
+                close_trade_result(trade, current_price, "WIN")
                 completed.append(trade)
-
-                send_message(f"""✅ PAPER TP HIT
-
-Pair: {trade['pair']}
-Direction: SELL
-Entry: {round(trade['entry'], 5)}
-Exit: {round(current_price, 5)}
-
-Result: WIN
-Profit: +${trade['profit']}
-
-Wins: {wins}
-Losses: {losses}
-Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
-Paper Balance: ${round(paper_balance, 2)}
-""")
 
             elif current_price >= trade["sl"]:
-                losses += 1
-                paper_balance -= trade["risk"]
+                if trade["break_even"]:
+                    close_trade_result(trade, current_price, "PROTECTED")
+                else:
+                    close_trade_result(trade, current_price, "LOSS")
                 completed.append(trade)
 
-                send_message(f"""❌ PAPER SL HIT
-
-Pair: {trade['pair']}
-Direction: SELL
-Entry: {round(trade['entry'], 5)}
-Exit: {round(current_price, 5)}
-
-Result: LOSS
-Loss: -${trade['risk']}
-
-Wins: {wins}
-Losses: {losses}
-Win Rate: {round((wins / max(wins + losses, 1)) * 100, 2)}%
-Paper Balance: ${round(paper_balance, 2)}
-""")
-
             else:
-                send_trade_update(trade, current_price)
+                send_trade_update(trade, current_price, progress)
 
     for trade in completed:
         active_trades.remove(trade)
 
-send_message("🤖 Forex AI Paper Bot Started — 75+ Score Mode + Status Updates")
+    if completed:
+        save_state()
 
-while True:
-    try:
-        print("Scanning forex market...")
 
-        check_active_trades()
+def send_daily_summary():
+    global last_daily_summary_date
 
-        for pair in PAIRS:
-            signal = analyze_pair(pair)
-            print(signal)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    hour = datetime.utcnow().hour
 
-            if signal["score"] >= MIN_SCORE and signal["trend"] != "NONE":
-                price = signal["price"]
+    if last_daily_summary_date == today:
+        return
 
-                risk = round(paper_balance * 0.01, 2)
-                profit = round(risk * 2, 2)
+    if hour != 21:
+        return
 
-                if signal["trend"] == "BUY":
-                    tp = price * 1.003
-                    sl = price * 0.997
-                else:
-                    tp = price * 0.997
-                    sl = price * 1.003
+    total = wins + losses + protected + expired
+    win_rate = round((wins / max(wins + losses, 1)) * 100, 2)
 
-                trade = {
-                    "pair": pair,
-                    "direction": signal["trend"],
-                    "entry": price,
-                    "tp": tp,
-                    "sl": sl,
-                    "risk": risk,
-                    "profit": profit
-                }
+    send_message(f"""📊 DAILY PAPER TRADING SUMMARY
 
-                active_trades.append(trade)
+Date: {today}
 
-                send_message(f"""🚨 A+ PAPER TRADE OPENED
+Wins: {wins}
+Losses: {losses}
+Protected: {protected}
+Expired: {expired}
+
+Win Rate: {win_rate}%
+Paper Balance: ${round(paper_balance, 2)}
+Open Trades: {len(active_trades)}
+Total Closed: {total}
+""")
+
+    last_daily_summary_date = today
+    save_state()
+
+
+def open_trade(signal):
+    pair = signal["pair"]
+
+    if len(active_trades) >= MAX_ACTIVE_TRADES:
+        return
+
+    if pair in cooldowns and time.time() - cooldowns[pair] < SL_COOLDOWN_SECONDS:
+        return
+
+    already_open = any(trade["pair"] == pair for trade in active_trades)
+
+    if already_open:
+        return
+
+    price = signal["price"]
+    risk = round(paper_balance * 0.01, 2)
+    profit = round(risk * 2, 2)
+
+    if signal["trend"] == "BUY":
+        tp = price * 1.003
+        sl = price * 0.997
+    else:
+        tp = price * 0.997
+        sl = price * 1.003
+
+    trade = {
+        "pair": pair,
+        "direction": signal["trend"],
+        "entry": price,
+        "tp": tp,
+        "sl": sl,
+        "risk": risk,
+        "profit": profit,
+        "break_even": False,
+        "opened_at": time.time(),
+        "score": signal["score"],
+        "rsi": signal["rsi"],
+        "volatility": signal["volatility"]
+    }
+
+    active_trades.append(trade)
+    save_state()
+
+    send_message(f"""🚨 A+ PAPER TRADE OPENED
 
 Pair: {pair}
 Direction: {signal['trend']}
@@ -279,8 +427,33 @@ Volatility: {signal['volatility']}
 Risk: ${risk}
 Target Profit: ${profit}
 
+Protections:
+- Break-even at 25%
+- Trailing stop after 40%
+- Max active trades: {MAX_ACTIVE_TRADES}
+- 4-hour expiration
+- Cooldown after SL
+
 Mode: PAPER TRADING ONLY
 """)
+
+
+load_state()
+send_message("🤖 Forex AI Paper Bot Started — Balanced Currency Mode")
+
+while True:
+    try:
+        print("Scanning forex market...")
+
+        check_active_trades()
+        send_daily_summary()
+
+        for pair in PAIRS:
+            signal = analyze_pair(pair)
+            print(signal)
+
+            if signal["score"] >= MIN_SCORE and signal["trend"] != "NONE":
+                open_trade(signal)
 
         time.sleep(300)
 
