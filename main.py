@@ -1,79 +1,187 @@
 import os
 import requests
+import pandas as pd
+import ta
 import time
+from telegram import Bot
+from datetime import datetime
 
-API_KEY = os.getenv("OANDA_API_KEY")
-ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# =========================
+# ENV VARIABLES
+# =========================
+
+OANDA_API_KEY = os.getenv("OANDA_API_KEY")
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-pairs = [
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# =========================
+# SETTINGS
+# =========================
+
+PAIRS = [
     "EUR_USD",
     "GBP_USD",
     "USD_JPY",
     "AUD_USD",
     "USD_CAD",
     "EUR_JPY",
-    "GBP_JPY",
-    "NZD_USD"
+    "GBP_JPY"
 ]
 
-headers = {
-    "Authorization": f"Bearer {API_KEY}"
-}
+TIMEFRAME = "M5"
 
-def send_telegram(message):
+RISK_PER_TRADE = 0.01
+MIN_SCORE = 80
 
-    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+cooldowns = {}
 
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
+# =========================
+# GET CHART DATA
+# =========================
+
+def get_candles(pair):
+
+    url = f"https://api-fxtrade.oanda.com/v3/instruments/{pair}/candles"
+
+    headers = {
+        "Authorization": f"Bearer {OANDA_API_KEY}"
     }
 
-    requests.post(telegram_url, data=data)
+    params = {
+        "granularity": TIMEFRAME,
+        "count": 100,
+        "price": "M"
+    }
 
-def get_price(pair):
+    r = requests.get(url, headers=headers, params=params)
 
-    url = f"https://api-fxtrade.oanda.com/v3/accounts/{ACCOUNT_ID}/pricing?instruments={pair}"
+    data = r.json()
 
-    response = requests.get(url, headers=headers)
+    candles = []
 
-    if response.status_code == 200:
+    for c in data["candles"]:
+        candles.append({
+            "close": float(c["mid"]["c"]),
+            "high": float(c["mid"]["h"]),
+            "low": float(c["mid"]["l"])
+        })
 
-        data = response.json()
+    return pd.DataFrame(candles)
 
-        bid = float(data["prices"][0]["bids"][0]["price"])
-        ask = float(data["prices"][0]["asks"][0]["price"])
+# =========================
+# ANALYSIS ENGINE
+# =========================
 
-        return (bid + ask) / 2
+def analyze_pair(pair):
 
-    return None
+    df = get_candles(pair)
 
-print("✅ Forex bot running...")
+    df["ema20"] = ta.trend.ema_indicator(df["close"], window=20)
+    df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
+
+    df["rsi"] = ta.momentum.rsi(df["close"], window=14)
+
+    latest = df.iloc[-1]
+
+    trend = "NONE"
+
+    if latest["ema20"] > latest["ema50"]:
+        trend = "BUY"
+
+    elif latest["ema20"] < latest["ema50"]:
+        trend = "SELL"
+
+    score = 0
+
+    # Trend strength
+    if trend != "NONE":
+        score += 30
+
+    # RSI filter
+    if trend == "BUY" and latest["rsi"] > 55:
+        score += 20
+
+    if trend == "SELL" and latest["rsi"] < 45:
+        score += 20
+
+    # Volatility
+    volatility = df["high"].iloc[-1] - df["low"].iloc[-1]
+
+    if volatility > 0.0008:
+        score += 20
+
+    # Session bonus
+    hour = datetime.utcnow().hour
+
+    if 7 <= hour <= 16:
+        score += 15
+
+    # Whale/smart-money simulation
+    if volatility > 0.0012:
+        score += 15
+
+    return {
+        "pair": pair,
+        "trend": trend,
+        "score": score,
+        "rsi": round(latest["rsi"], 2),
+        "volatility": round(volatility, 5)
+    }
+
+# =========================
+# TELEGRAM ALERT
+# =========================
+
+def send_alert(signal):
+
+    message = f"""
+🚨 FOREX SIGNAL
+
+Pair: {signal['pair']}
+Direction: {signal['trend']}
+Score: {signal['score']}
+
+RSI: {signal['rsi']}
+Volatility: {signal['volatility']}
+
+📈 AI Setup Approved
+"""
+
+    bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text=message
+    )
+
+# =========================
+# MAIN LOOP
+# =========================
 
 while True:
 
-    for pair in pairs:
+    print("Scanning forex market...")
+
+    for pair in PAIRS:
 
         try:
 
-            price = get_price(pair)
+            signal = analyze_pair(pair)
 
-            if price:
+            print(signal)
 
-                print(f"{pair}: {price}")
+            if signal["score"] >= MIN_SCORE:
 
-                if price > 1:
+                last_trade = cooldowns.get(pair)
 
-                    send_telegram(
-                        f"🚨 Trade Setup Found\n\nPair: {pair}\nPrice: {price}"
-                    )
+                if not last_trade or time.time() - last_trade > 3600:
 
-            time.sleep(5)
+                    send_alert(signal)
+
+                    cooldowns[pair] = time.time()
 
         except Exception as e:
+            print("ERROR:", e)
 
-            print("Error:", e)
-
-    time.sleep(60)
+    time.sleep(300)
