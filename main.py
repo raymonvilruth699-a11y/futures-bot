@@ -19,35 +19,30 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAPER_TRADING = True
 
-# Focused cleaner pairs
 PAIRS = [
     "USD_JPY",
-    "GBP_JPY",
-    "EUR_USD"
+    "EUR_USD",
+    "GBP_USD"
 ]
 
 TIMEFRAME = "M5"
 CANDLE_COUNT = 100
 
-MIN_SCORE = 85
+# Lowered from 85 to 75
+MIN_SCORE = 75
 
 # =========================
 # RISK MANAGEMENT
 # =========================
 
-# Close trade automatically at -20%
 STOP_LOSS_PERCENT = -20.0
 
-# Activate protection at +25%
 PROFIT_PROTECTION_TRIGGER = 25.0
 
-# Exit protected trades if profit falls back to +15%
 PROFIT_PROTECTION_EXIT = 15.0
 
-# Max active trades
 MAX_ACTIVE_TRADES = 3
 
-# Prevent too many correlated trades
 MAX_SAME_CURRENCY_TRADES = 1
 
 SCAN_SECONDS = 300
@@ -61,14 +56,13 @@ HEADERS = {
 }
 
 # =========================
-# ACTIVE PAPER TRADES
+# ACTIVE TRADES
 # =========================
 
 active_trades = {}
 
-
 # =========================
-# TELEGRAM ALERTS
+# TELEGRAM
 # =========================
 
 def send_telegram(message):
@@ -78,6 +72,7 @@ def send_telegram(message):
         return
 
     try:
+
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
         payload = {
@@ -92,7 +87,7 @@ def send_telegram(message):
 
 
 # =========================
-# GET OANDA CANDLES
+# GET MARKET DATA
 # =========================
 
 def get_candles(pair):
@@ -139,7 +134,7 @@ def get_candles(pair):
 
 
 # =========================
-# ADD INDICATORS
+# INDICATORS
 # =========================
 
 def add_indicators(df):
@@ -172,7 +167,7 @@ def add_indicators(df):
 
 
 # =========================
-# SCORE TRADES
+# SCORE TRADE
 # =========================
 
 def score_trade(df, pair):
@@ -262,7 +257,7 @@ def can_open_trade(pair):
 
 
 # =========================
-# OPEN PAPER TRADE
+# OPEN TRADE
 # =========================
 
 def open_paper_trade(pair, direction, entry_price, score):
@@ -283,11 +278,13 @@ def open_paper_trade(pair, direction, entry_price, score):
 
 Pair: {pair}
 Direction: {direction}
+
 Entry: {entry_price}
 Score: {score}
 
 🛑 Stop Loss: -20%
 🔒 Profit Protection: +25%
+🚪 Protected Exit: +15%
 """)
 
 
@@ -300,7 +297,6 @@ def calculate_tp_progress(trade, current_price):
     entry = trade["entry"]
     direction = trade["direction"]
 
-    # estimated TP movement
     if "JPY" in trade["pair"]:
         target_distance = 0.30
     else:
@@ -352,7 +348,7 @@ Reason: {reason}
 
 
 # =========================
-# MANAGE OPEN TRADES
+# MANAGE TRADES
 # =========================
 
 def manage_open_trades():
@@ -376,7 +372,7 @@ def manage_open_trades():
             current_price
         )
 
-        # Track highest progress
+        # Highest progress tracker
         if progress > trade["highest_progress"]:
             trade["highest_progress"] = progress
 
@@ -396,7 +392,7 @@ def manage_open_trades():
             continue
 
         # =========================
-        # ACTIVATE PROFIT PROTECTION
+        # PROFIT PROTECTION
         # =========================
 
         if (
@@ -463,22 +459,32 @@ Profit Protection: {trade['profit_protection']}
 
 
 # =========================
-# MARKET SCANNER
+# SCAN MARKET
 # =========================
 
 def scan_market():
 
+    found_signal = False
+
     for pair in PAIRS:
 
         if not can_open_trade(pair):
+
+            print(f"Skipping {pair}: max trades or correlation")
+
             continue
 
         df = get_candles(pair)
 
         if df.empty:
+
+            print(f"No candle data for {pair}")
+
             continue
 
         direction, score = score_trade(df, pair)
+
+        print(f"{pair} | Direction: {direction} | Score: {score}")
 
         if direction and score >= MIN_SCORE:
 
@@ -490,6 +496,18 @@ def scan_market():
                 entry_price,
                 score
             )
+
+            found_signal = True
+
+        else:
+
+            print(f"No trade for {pair}. Score too low.")
+
+    if not found_signal:
+
+        send_telegram(
+            "🔎 No clean Forex setup yet. Bot is still scanning."
+        )
 
 
 # =========================
@@ -505,13 +523,15 @@ Mode: PAPER TRADING
 
 Pairs:
 - USD_JPY
-- GBP_JPY
 - EUR_USD
+- GBP_USD
 
 Risk Rules:
 🛑 Stop Loss: -20%
 🔒 Profit Protection: +25%
 🚪 Protected Exit: +15%
+
+Minimum Score: 75
 
 Max Active Trades: 3
 Max Same Currency Trades: 1
