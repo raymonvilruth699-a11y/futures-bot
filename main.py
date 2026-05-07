@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import ta
 import time
-from telegram import Bot
 from datetime import datetime
 
 # =========================
@@ -14,8 +13,6 @@ OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-bot = Bot(token=TELEGRAM_TOKEN)
 
 # =========================
 # SETTINGS
@@ -33,7 +30,6 @@ PAIRS = [
 
 TIMEFRAME = "M5"
 
-RISK_PER_TRADE = 0.01
 MIN_SCORE = 80
 
 cooldowns = {}
@@ -150,10 +146,14 @@ Volatility: {signal['volatility']}
 📈 AI Setup Approved
 """
 
-    bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text=message
-    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+
+    requests.post(url, data=payload)
 
 # =========================
 # MAIN LOOP
