@@ -40,18 +40,11 @@ MAX_SAME_CURRENCY_TRADES = 1
 
 SCAN_SECONDS = 60
 
-# ==========================================
-# OANDA PRACTICE URL
-# ==========================================
-
-OANDA_URL = "https://api-fxpractice.oanda.com/v3"
-
-# ==========================================
-# FIXED AUTH HEADER
-# ==========================================
+# LIVE OANDA URL
+OANDA_URL = "https://api-fxtrade.oanda.com/v3"
 
 HEADERS = {
-    "Authorization": OANDA_API_KEY if OANDA_API_KEY.startswith("Bearer ") else f"Bearer {OANDA_API_KEY}",
+    "Authorization": OANDA_API_KEY if OANDA_API_KEY and OANDA_API_KEY.startswith("Bearer ") else f"Bearer {OANDA_API_KEY}",
     "Content-Type": "application/json"
 }
 
@@ -62,24 +55,18 @@ active_trades = {}
 # ==========================================
 
 def send_telegram(message):
-
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured.")
         return
 
     try:
-
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message
         }
-
         requests.post(url, data=payload, timeout=10)
-
     except Exception as e:
-
         print("Telegram Error:", e)
 
 
@@ -88,9 +75,7 @@ def send_telegram(message):
 # ==========================================
 
 def get_candles(pair):
-
     try:
-
         url = f"{OANDA_URL}/instruments/{pair}/candles"
 
         params = {
@@ -114,19 +99,14 @@ def get_candles(pair):
         print(f"{pair} STATUS:", response.status_code)
 
         if response.status_code != 200:
-
             print(f"OANDA ERROR for {pair}: {response.text}")
-
             return pd.DataFrame()
 
         data = response.json()
-
         candles = []
 
         for candle in data.get("candles", []):
-
             if candle.get("complete"):
-
                 candles.append({
                     "time": candle["time"],
                     "open": float(candle["mid"]["o"]),
@@ -136,15 +116,10 @@ def get_candles(pair):
                     "volume": int(candle["volume"])
                 })
 
-        if len(candles) == 0:
-            print(f"No candles returned for {pair}")
-
         return pd.DataFrame(candles)
 
     except Exception as e:
-
         print(f"Error loading {pair}: {e}")
-
         return pd.DataFrame()
 
 
@@ -153,30 +128,16 @@ def get_candles(pair):
 # ==========================================
 
 def add_indicators(df):
-
     df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
-
     df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
-
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
 
     df["avg_volume"] = df["volume"].rolling(20).mean()
+    df["volume_spike"] = df["volume"] > df["avg_volume"] * 1.10
 
-    df["volume_spike"] = (
-        df["volume"] > df["avg_volume"] * 1.10
-    )
-
-    df["candle_body"] = abs(
-        df["close"] - df["open"]
-    )
-
-    df["range"] = (
-        df["high"] - df["low"]
-    )
-
-    df["strong_candle"] = (
-        df["candle_body"] > df["range"] * 0.45
-    )
+    df["candle_body"] = abs(df["close"] - df["open"])
+    df["range"] = df["high"] - df["low"]
+    df["strong_candle"] = df["candle_body"] > df["range"] * 0.45
 
     return df
 
@@ -186,7 +147,6 @@ def add_indicators(df):
 # ==========================================
 
 def score_trade(df, pair):
-
     if df.empty or len(df) < 60:
         return None, 0
 
@@ -242,7 +202,6 @@ def currencies_in_pair(pair):
 
 
 def can_open_trade(pair):
-
     if pair in active_trades:
         return False
 
@@ -252,13 +211,10 @@ def can_open_trade(pair):
     new_currencies = currencies_in_pair(pair)
 
     for active_pair in active_trades.keys():
-
         active_currencies = currencies_in_pair(active_pair)
 
         for currency in new_currencies:
-
             if currency in active_currencies:
-
                 count = sum(
                     currency in currencies_in_pair(p)
                     for p in active_trades.keys()
@@ -271,11 +227,10 @@ def can_open_trade(pair):
 
 
 # ==========================================
-# OPEN TRADE
+# OPEN PAPER TRADE
 # ==========================================
 
 def open_paper_trade(pair, direction, entry_price, score):
-
     active_trades[pair] = {
         "pair": pair,
         "direction": direction,
@@ -307,9 +262,7 @@ Score: {score}
 # ==========================================
 
 def calculate_tp_progress(trade, current_price):
-
     entry = trade["entry"]
-
     direction = trade["direction"]
 
     if "JPY" in trade["pair"]:
@@ -318,18 +271,9 @@ def calculate_tp_progress(trade, current_price):
         target_distance = 0.0030
 
     if direction == "BUY":
-
-        progress = (
-            (current_price - entry)
-            / target_distance
-        ) * 100
-
+        progress = ((current_price - entry) / target_distance) * 100
     else:
-
-        progress = (
-            (entry - current_price)
-            / target_distance
-        ) * 100
+        progress = ((entry - current_price) / target_distance) * 100
 
     return round(progress, 2)
 
@@ -339,7 +283,6 @@ def calculate_tp_progress(trade, current_price):
 # ==========================================
 
 def close_trade(pair, reason, current_price, progress):
-
     trade = active_trades.get(pair)
 
     if not trade:
@@ -367,12 +310,10 @@ Reason: {reason}
 # ==========================================
 
 def manage_open_trades():
-
     if not active_trades:
         return
 
     for pair in list(active_trades.keys()):
-
         trade = active_trades[pair]
 
         df = get_candles(pair)
@@ -381,35 +322,21 @@ def manage_open_trades():
             continue
 
         current_price = float(df.iloc[-1]["close"])
-
-        progress = calculate_tp_progress(
-            trade,
-            current_price
-        )
+        progress = calculate_tp_progress(trade, current_price)
 
         if progress > trade["highest_progress"]:
             trade["highest_progress"] = progress
 
-        # STOP LOSS
-
         if progress <= STOP_LOSS_PERCENT:
-
             close_trade(
                 pair,
                 "🛑 STOP LOSS HIT",
                 current_price,
                 progress
             )
-
             continue
 
-        # PROFIT PROTECTION
-
-        if (
-            progress >= PROFIT_PROTECTION_TRIGGER
-            and not trade["profit_protection"]
-        ):
-
+        if progress >= PROFIT_PROTECTION_TRIGGER and not trade["profit_protection"]:
             trade["profit_protection"] = True
 
             send_telegram(f"""
@@ -422,20 +349,13 @@ Current Progress: {progress}%
 Highest Progress: {trade['highest_progress']}%
 """)
 
-        # PROTECTED EXIT
-
-        if (
-            trade["profit_protection"]
-            and progress <= PROFIT_PROTECTION_EXIT
-        ):
-
+        if trade["profit_protection"] and progress <= PROFIT_PROTECTION_EXIT:
             close_trade(
                 pair,
                 "🔒 PROFIT PROTECTED EXIT",
                 current_price,
                 progress
             )
-
             continue
 
         status = (
@@ -467,23 +387,17 @@ Profit Protection: {trade['profit_protection']}
 # ==========================================
 
 def scan_market():
-
     found_signal = False
 
     for pair in PAIRS:
-
         if not can_open_trade(pair):
-
             print(f"Skipping {pair}: max trades or correlation")
-
             continue
 
         df = get_candles(pair)
 
         if df.empty:
-
             print(f"No candle data for {pair}")
-
             continue
 
         direction, score = score_trade(df, pair)
@@ -491,7 +405,6 @@ def scan_market():
         print(f"{pair} | Direction: {direction} | Score: {score}")
 
         if direction and score >= MIN_SCORE:
-
             entry_price = float(df.iloc[-1]["close"])
 
             open_paper_trade(
@@ -504,11 +417,9 @@ def scan_market():
             found_signal = True
 
         else:
-
             print(f"No trade for {pair}. Score too low.")
 
     if not found_signal:
-
         print("No clean setup yet.")
 
 
@@ -517,11 +428,11 @@ def scan_market():
 # ==========================================
 
 def main():
-
     send_telegram("""
 🤖 FOREX BOT STARTED
 
 Mode: PAPER TRADING
+Data Source: LIVE OANDA
 
 Pairs:
 - USD_JPY
@@ -545,29 +456,19 @@ Bot is now scanning.
 """)
 
     while True:
-
         try:
-
             print("Scanning market...")
 
             scan_market()
-
             manage_open_trades()
 
             time.sleep(SCAN_SECONDS)
 
         except Exception as e:
-
             print("Main Loop Error:", e)
-
             send_telegram(f"⚠️ BOT ERROR: {e}")
-
             time.sleep(60)
 
-
-# ==========================================
-# START BOT
-# ==========================================
 
 if __name__ == "__main__":
     main()
