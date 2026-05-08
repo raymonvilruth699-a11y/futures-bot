@@ -4,20 +4,12 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 
-# ==========================================
-# ENV VARIABLES
-# ==========================================
-
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ==========================================
-# LIVE / PAPER SETTINGS
-# ==========================================
-
-LIVE_TRADING = True  # Change to True only when ready for real money
+LIVE_TRADING = True
 PAPER_TRADING = not LIVE_TRADING
 
 TRADE_UNITS = 250
@@ -39,7 +31,9 @@ TRAILING_PROFIT_GIVEBACK = 10.0
 MIN_PROTECTED_EXIT = 15.0
 
 MAX_ACTIVE_TRADES = 3
-MAX_SAME_CURRENCY_TRADES = 1
+
+# Updated: allows USD_JPY to trade even if GBP_USD is open
+MAX_SAME_CURRENCY_TRADES = 2
 
 SCAN_SECONDS = 60
 
@@ -59,9 +53,6 @@ HEADERS = {
 
 active_trades = {}
 
-# ==========================================
-# TELEGRAM
-# ==========================================
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -79,10 +70,6 @@ def send_telegram(message):
         print("Telegram Error:", e)
 
 
-# ==========================================
-# WEEKEND MARKET FILTER
-# ==========================================
-
 def market_is_closed():
     now = datetime.now(timezone.utc)
 
@@ -97,10 +84,6 @@ def market_is_closed():
 
     return False
 
-
-# ==========================================
-# OANDA DATA
-# ==========================================
 
 def get_candles(pair):
     try:
@@ -145,10 +128,6 @@ def get_candles(pair):
         print(f"Error loading {pair}: {e}")
         return pd.DataFrame()
 
-
-# ==========================================
-# LIVE ORDER FUNCTIONS
-# ==========================================
 
 def place_live_order(pair, direction):
     units = TRADE_UNITS if direction == "BUY" else -TRADE_UNITS
@@ -220,10 +199,6 @@ def close_live_order(trade):
     return True
 
 
-# ==========================================
-# INDICATORS
-# ==========================================
-
 def add_indicators(df):
     df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
     df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
@@ -238,10 +213,6 @@ def add_indicators(df):
 
     return df
 
-
-# ==========================================
-# SCORE TRADE
-# ==========================================
 
 def score_trade(df, pair):
     if df.empty or len(df) < 60:
@@ -290,10 +261,6 @@ def score_trade(df, pair):
     return direction, score
 
 
-# ==========================================
-# FILTERS
-# ==========================================
-
 def currencies_in_pair(pair):
     return pair.split("_")
 
@@ -322,10 +289,6 @@ def can_open_trade(pair):
 
     return True
 
-
-# ==========================================
-# COOLDOWN
-# ==========================================
 
 def is_in_cooldown():
     global cooldown_until
@@ -370,10 +333,6 @@ New entries paused for {COOLDOWN_MINUTES} minutes.
 Existing trades will still be managed.
 """)
 
-
-# ==========================================
-# TRADE MANAGEMENT
-# ==========================================
 
 def open_trade(pair, direction, entry_price, score):
     live_result = None
@@ -561,10 +520,6 @@ Protected Exit: {trade.get('protected_exit')}
 """)
 
 
-# ==========================================
-# SCANNER
-# ==========================================
-
 def scan_market():
     if is_in_cooldown():
         print("Cooldown active. Skipping new entries.")
@@ -599,10 +554,6 @@ def scan_market():
         print("No clean setup yet.")
 
 
-# ==========================================
-# MAIN LOOP
-# ==========================================
-
 def main():
     send_telegram(f"""
 🤖 FOREX BOT STARTED
@@ -627,6 +578,9 @@ Risk Rules:
 Cooldown:
 🧊 {STOP_LOSS_LIMIT_IN_WINDOW} stop losses in {STOP_LOSS_WINDOW_MINUTES} minutes
 → pause new entries for {COOLDOWN_MINUTES} minutes
+
+Max Active Trades: {MAX_ACTIVE_TRADES}
+Max Same Currency Trades: {MAX_SAME_CURRENCY_TRADES}
 
 Weekend Filter: ON
 Scan Speed: Every {SCAN_SECONDS} seconds
