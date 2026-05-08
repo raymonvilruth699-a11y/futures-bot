@@ -3,6 +3,7 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
@@ -31,11 +32,14 @@ TRAILING_PROFIT_GIVEBACK = 10.0
 MIN_PROTECTED_EXIT = 15.0
 
 MAX_ACTIVE_TRADES = 3
-
-# Updated: allows USD_JPY to trade even if GBP_USD is open
 MAX_SAME_CURRENCY_TRADES = 2
 
 SCAN_SECONDS = 60
+
+# Trade entries only between 3 AM and 12 PM Eastern
+TRADING_TIMEZONE = ZoneInfo("America/New_York")
+TRADING_START_HOUR = 3
+TRADING_END_HOUR = 12
 
 STOP_LOSS_WINDOW_MINUTES = 15
 STOP_LOSS_LIMIT_IN_WINDOW = 2
@@ -81,6 +85,20 @@ def market_is_closed():
 
     if now.weekday() == 6 and now.hour < 22:
         return True
+
+    return False
+
+
+def within_trading_hours():
+    now_et = datetime.now(TRADING_TIMEZONE)
+
+    # Sunday entries allowed after 5 PM Eastern
+    if now_et.weekday() == 6:
+        return now_et.hour >= 17
+
+    # Monday-Friday entries allowed 3 AM to 12 PM Eastern
+    if now_et.weekday() in [0, 1, 2, 3, 4]:
+        return TRADING_START_HOUR <= now_et.hour < TRADING_END_HOUR
 
     return False
 
@@ -521,6 +539,10 @@ Protected Exit: {trade.get('protected_exit')}
 
 
 def scan_market():
+    if not within_trading_hours():
+        print("Outside trading hours. Managing existing trades only.")
+        return
+
     if is_in_cooldown():
         print("Cooldown active. Skipping new entries.")
         return
@@ -582,6 +604,10 @@ Cooldown:
 Max Active Trades: {MAX_ACTIVE_TRADES}
 Max Same Currency Trades: {MAX_SAME_CURRENCY_TRADES}
 
+Entry Hours:
+Sunday from 5 PM Eastern
+Monday-Friday 3 AM–12 PM Eastern
+
 Weekend Filter: ON
 Scan Speed: Every {SCAN_SECONDS} seconds
 
@@ -592,6 +618,7 @@ Bot is now scanning.
         try:
             if market_is_closed():
                 print("Forex market closed. Waiting...")
+                manage_open_trades()
                 time.sleep(300)
                 continue
 
