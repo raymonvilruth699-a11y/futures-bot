@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # LIVE / PAPER SETTINGS
 # ==========================================
 
-LIVE_TRADING = False  # Change to True only when ready for real money
+LIVE_TRADING = True  # Change to True only when ready for real money
 PAPER_TRADING = not LIVE_TRADING
 
 TRADE_UNITS = 250
