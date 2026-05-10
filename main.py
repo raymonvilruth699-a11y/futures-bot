@@ -75,10 +75,16 @@ def send_telegram(message):
 
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+        requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message
+            },
+            timeout=10
+        )
     except Exception as e:
         print("Telegram Error:", e)
-
 
 # ==========================================
 # MARKET HOURS
@@ -89,8 +95,10 @@ def market_is_closed():
 
     if now.weekday() == 4 and now.hour >= 22:
         return True
+
     if now.weekday() == 5:
         return True
+
     if now.weekday() == 6 and now.hour < 22:
         return True
 
@@ -100,14 +108,15 @@ def market_is_closed():
 def within_trading_hours():
     now_et = datetime.now(TRADING_TIMEZONE)
 
+    # Sunday entries allowed after 5 PM Eastern
     if now_et.weekday() == 6:
         return now_et.hour >= 17
 
+    # Monday-Friday entries allowed 3 AM to 12 PM Eastern
     if now_et.weekday() in [0, 1, 2, 3, 4]:
         return TRADING_START_HOUR <= now_et.hour < TRADING_END_HOUR
 
     return False
-
 
 # ==========================================
 # OANDA DATA
@@ -123,7 +132,12 @@ def get_candles(pair):
             "price": "M"
         }
 
-        response = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            params=params,
+            timeout=15
+        )
 
         print(f"{pair} STATUS:", response.status_code)
 
@@ -150,7 +164,6 @@ def get_candles(pair):
     except Exception as e:
         print(f"Error loading {pair}: {e}")
         return pd.DataFrame()
-
 
 # ==========================================
 # PRICE / BROKER STOP
@@ -179,7 +192,6 @@ def calculate_broker_stop_price(pair, direction, entry_price):
 
     return format_price(pair, stop_price)
 
-
 # ==========================================
 # LIVE ORDER FUNCTIONS
 # ==========================================
@@ -203,7 +215,12 @@ def place_live_order(pair, direction, entry_price):
         }
     }
 
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=15)
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json=payload,
+        timeout=15
+    )
 
     if response.status_code not in [200, 201]:
         send_telegram(
@@ -211,14 +228,14 @@ def place_live_order(pair, direction, entry_price):
             f"Pair: {pair}\n"
             f"Direction: {direction}\n"
             f"Units: {units}\n"
-            f"Stop Price: {stop_price}\n"
+            f"Broker SL: {stop_price}\n"
             f"Error: {response.text}"
         )
         return None
 
     return {
         "units": units,
-        "stop_price": stop_price,
+        "broker_stop_price": stop_price,
         "response": response.json()
     }
 
@@ -238,7 +255,12 @@ def close_live_order(trade):
         }
     }
 
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=15)
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json=payload,
+        timeout=15
+    )
 
     if response.status_code not in [200, 201]:
         send_telegram(
@@ -249,69 +271,6 @@ def close_live_order(trade):
         return False
 
     return True
-
-
-# ==========================================
-# SYNC EXISTING POSITIONS
-# ==========================================
-
-def sync_existing_positions():
-    if not LIVE_TRADING:
-        return
-
-    try:
-        url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/openPositions"
-        response = requests.get(url, headers=HEADERS, timeout=15)
-
-        if response.status_code != 200:
-            print("SYNC POSITIONS ERROR:", response.text)
-            return
-
-        data = response.json()
-
-        for position in data.get("positions", []):
-            pair = position["instrument"]
-
-            long_units = int(float(position["long"]["units"]))
-            short_units = int(float(position["short"]["units"]))
-
-            if long_units > 0:
-                direction = "BUY"
-                units = long_units
-                entry = float(position["long"]["averagePrice"])
-            elif short_units < 0:
-                direction = "SELL"
-                units = short_units
-                entry = float(position["short"]["averagePrice"])
-            else:
-                continue
-
-            if pair not in active_trades:
-                active_trades[pair] = {
-                    "pair": pair,
-                    "direction": direction,
-                    "entry": entry,
-                    "score": 0,
-                    "status": "OPEN",
-                    "opened_at": datetime.now(timezone.utc).isoformat(),
-                    "profit_protection": False,
-                    "highest_progress": 0.0,
-                    "protected_exit": None,
-                    "units": units,
-                    "broker_stop_price": None
-                }
-
-                send_telegram(f"""
-🔄 EXISTING LIVE POSITION SYNCED
-
-Pair: {pair}
-Direction: {direction}
-Units: {units}
-Entry: {entry}
-
-Bot will manage this trade from now.
-""")
-
 
 # ==========================================
 # INDICATORS
@@ -378,7 +337,6 @@ def score_trade(df, pair):
 
     return direction, score
 
-
 # ==========================================
 # FILTERS / COOLDOWN
 # ==========================================
@@ -401,7 +359,10 @@ def can_open_trade(pair):
 
         for currency in new_currencies:
             if currency in active_currencies:
-                count = sum(currency in currencies_in_pair(p) for p in active_trades.keys())
+                count = sum(
+                    currency in currencies_in_pair(p)
+                    for p in active_trades.keys()
+                )
 
                 if count >= MAX_SAME_CURRENCY_TRADES:
                     return False
@@ -451,7 +412,6 @@ New entries paused for {COOLDOWN_MINUTES} minutes.
 Existing trades will still be managed.
 """)
 
-
 # ==========================================
 # TRADE MANAGEMENT
 # ==========================================
@@ -468,7 +428,7 @@ def open_trade(pair, direction, entry_price, score):
             return
 
         units = live_result["units"]
-        broker_stop_price = live_result["stop_price"]
+        broker_stop_price = live_result["broker_stop_price"]
 
     active_trades[pair] = {
         "pair": pair,
@@ -638,7 +598,6 @@ Broker Emergency SL: {trade.get('broker_stop_price')}
 {status}
 """)
 
-
 # ==========================================
 # SCANNER
 # ==========================================
@@ -679,7 +638,6 @@ def scan_market():
     if not found_signal:
         print("No clean setup yet.")
 
-
 # ==========================================
 # MAIN LOOP
 # ==========================================
@@ -702,7 +660,6 @@ Live Units: {TRADE_UNITS}
 Safety:
 ✅ Broker-side emergency SL on NEW trades
 ✅ Bot-managed stop/profit exits
-✅ Existing positions synced after restart
 
 Risk Rules:
 🛑 Bot Stop Loss: {STOP_LOSS_PERCENT}%
@@ -727,12 +684,8 @@ Scan Speed: Every {SCAN_SECONDS} seconds
 Bot is now scanning.
 """)
 
-    sync_existing_positions()
-
     while True:
         try:
-            sync_existing_positions()
-
             if market_is_closed():
                 print("Forex market closed. Waiting...")
                 manage_open_trades()
