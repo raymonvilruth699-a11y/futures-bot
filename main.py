@@ -16,7 +16,6 @@ PAPER_TRADING = not LIVE_TRADING
 TRADE_UNITS = 250
 
 PAIRS = [
-    # Institutional / most traded pairs
     "EUR_USD",
     "GBP_USD",
     "USD_JPY",
@@ -24,7 +23,6 @@ PAIRS = [
     "USD_CAD",
     "AUD_USD",
 
-    # Gold-like volatile movers
     "GBP_JPY",
     "EUR_JPY",
     "GBP_CAD",
@@ -33,7 +31,6 @@ PAIRS = [
     "CAD_JPY",
     "NZD_JPY",
 
-    # Trend & momentum pairs
     "EUR_GBP",
     "EUR_AUD",
     "GBP_AUD"
@@ -79,7 +76,6 @@ def send_telegram(message):
 
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
         requests.post(
             url,
             data={
@@ -88,7 +84,6 @@ def send_telegram(message):
             },
             timeout=10
         )
-
     except Exception as e:
         print("Telegram Error:", e)
 
@@ -170,13 +165,6 @@ def get_candles(pair):
         return pd.DataFrame()
 
 
-def format_price(pair, price):
-    if "JPY" in pair:
-        return f"{price:.3f}"
-
-    return f"{price:.5f}"
-
-
 def get_target_distance(pair):
     if "JPY" in pair:
         return 0.30
@@ -184,29 +172,8 @@ def get_target_distance(pair):
     return 0.0030
 
 
-def calculate_broker_stop_price(pair, direction, entry_price):
-    target_distance = get_target_distance(pair)
-
-    stop_distance = target_distance * (
-        abs(STOP_LOSS_PERCENT) / 100
-    )
-
-    if direction == "BUY":
-        stop_price = entry_price - stop_distance
-    else:
-        stop_price = entry_price + stop_distance
-
-    return format_price(pair, stop_price)
-
-
 def place_live_order(pair, direction, entry_price):
     units = TRADE_UNITS if direction == "BUY" else -TRADE_UNITS
-
-    stop_price = calculate_broker_stop_price(
-        pair,
-        direction,
-        entry_price
-    )
 
     url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/orders"
 
@@ -216,10 +183,7 @@ def place_live_order(pair, direction, entry_price):
             "instrument": pair,
             "units": str(units),
             "timeInForce": "FOK",
-            "positionFill": "DEFAULT",
-            "stopLossOnFill": {
-                "price": stop_price
-            }
+            "positionFill": "DEFAULT"
         }
     }
 
@@ -236,15 +200,12 @@ def place_live_order(pair, direction, entry_price):
             f"Pair: {pair}\n"
             f"Direction: {direction}\n"
             f"Units: {units}\n"
-            f"Broker SL: {stop_price}\n"
             f"Error: {response.text}"
         )
-
         return None
 
     return {
         "units": units,
-        "broker_stop_price": stop_price,
         "response": response.json()
     }
 
@@ -277,7 +238,6 @@ def close_live_order(trade):
             f"Pair: {trade['pair']}\n"
             f"Error: {response.text}"
         )
-
         return False
 
     return True
@@ -351,7 +311,7 @@ def sync_existing_positions():
                 "highest_progress": 0.0,
                 "protected_exit": None,
                 "units": position["units"],
-                "broker_stop_price": "Existing position"
+                "broker_stop_price": "Removed"
             }
 
             send_telegram(
@@ -472,9 +432,7 @@ def can_open_trade(pair):
     new_currencies = currencies_in_pair(pair)
 
     for active_pair in active_trades.keys():
-        active_currencies = currencies_in_pair(
-            active_pair
-        )
+        active_currencies = currencies_in_pair(active_pair)
 
         for currency in new_currencies:
             if currency in active_currencies:
@@ -553,7 +511,6 @@ Existing trades still managed.
 def open_trade(pair, direction, entry_price, score):
     live_result = None
     units = 0
-    broker_stop_price = None
 
     if LIVE_TRADING:
         live_result = place_live_order(
@@ -566,9 +523,6 @@ def open_trade(pair, direction, entry_price, score):
             return
 
         units = live_result["units"]
-        broker_stop_price = live_result[
-            "broker_stop_price"
-        ]
 
     active_trades[pair] = {
         "pair": pair,
@@ -581,7 +535,7 @@ def open_trade(pair, direction, entry_price, score):
         "highest_progress": 0.0,
         "protected_exit": None,
         "units": units,
-        "broker_stop_price": broker_stop_price
+        "broker_stop_price": "Removed"
     }
 
     send_telegram(
@@ -595,8 +549,11 @@ Units: {TRADE_UNITS}
 Entry: {entry_price}
 Score: {score}
 
-Broker Emergency SL:
-{broker_stop_price}
+Broker SL:
+Removed
+
+Bot Stop Loss:
+{STOP_LOSS_PERCENT}%
 """
     )
 
@@ -825,6 +782,18 @@ Pairs:
 
 Units:
 {TRADE_UNITS}
+
+Broker-side SL:
+REMOVED
+
+Bot-managed Stop Loss:
+{STOP_LOSS_PERCENT}%
+
+Profit Protection:
+Starts at +{PROFIT_PROTECTION_TRIGGER}%
+
+Trailing Lock:
+Highest Profit - {TRAILING_PROFIT_GIVEBACK}%
 
 Max Active Trades:
 {MAX_ACTIVE_TRADES}
