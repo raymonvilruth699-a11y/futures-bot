@@ -16,10 +16,27 @@ PAPER_TRADING = not LIVE_TRADING
 TRADE_UNITS = 250
 
 PAIRS = [
-    "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "USD_CAD", "AUD_USD", "NZD_USD",
-    "GBP_JPY", "EUR_JPY", "GBP_CAD", "GBP_CHF", "AUD_JPY", "CAD_JPY", "NZD_JPY",
-    "EUR_GBP", "EUR_AUD", "GBP_AUD",
-    "GBP_ZAR"
+    # Institutional / most traded pairs
+    "EUR_USD",
+    "GBP_USD",
+    "USD_JPY",
+    "USD_CHF",
+    "USD_CAD",
+    "AUD_USD",
+
+    # Gold-like volatile movers
+    "GBP_JPY",
+    "EUR_JPY",
+    "GBP_CAD",
+    "GBP_CHF",
+    "AUD_JPY",
+    "CAD_JPY",
+    "NZD_JPY",
+
+    # Trend & momentum pairs
+    "EUR_GBP",
+    "EUR_AUD",
+    "GBP_AUD"
 ]
 
 TIMEFRAME = "M5"
@@ -59,9 +76,19 @@ def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured.")
         return
+
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+
+        requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message
+            },
+            timeout=10
+        )
+
     except Exception as e:
         print("Telegram Error:", e)
 
@@ -71,8 +98,10 @@ def market_is_closed():
 
     if now.weekday() == 4 and now.hour >= 22:
         return True
+
     if now.weekday() == 5:
         return True
+
     if now.weekday() == 6 and now.hour < 22:
         return True
 
@@ -82,15 +111,15 @@ def market_is_closed():
 def within_trading_hours():
     now_et = datetime.now(TRADING_TIMEZONE)
 
-    # Sunday rule: allow entries after 5 PM Eastern
+    # Sunday after 5 PM ET
     if now_et.weekday() == 6:
         return now_et.hour >= 17
 
-    # Monday-Thursday: 8 PM through 12 PM next day
+    # Monday-Thursday 8 PM -> 12 PM
     if now_et.weekday() in [0, 1, 2, 3]:
         return now_et.hour >= 20 or now_et.hour < 12
 
-    # Friday: allow only until 12 PM Eastern
+    # Friday only until 12 PM
     if now_et.weekday() == 4:
         return now_et.hour < 12
 
@@ -107,7 +136,12 @@ def get_candles(pair):
             "price": "M"
         }
 
-        response = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            params=params,
+            timeout=15
+        )
 
         print(f"{pair} STATUS:", response.status_code)
 
@@ -139,20 +173,23 @@ def get_candles(pair):
 def format_price(pair, price):
     if "JPY" in pair:
         return f"{price:.3f}"
+
     return f"{price:.5f}"
 
 
 def get_target_distance(pair):
     if "JPY" in pair:
         return 0.30
-    if "ZAR" in pair:
-        return 0.30
+
     return 0.0030
 
 
 def calculate_broker_stop_price(pair, direction, entry_price):
     target_distance = get_target_distance(pair)
-    stop_distance = target_distance * (abs(STOP_LOSS_PERCENT) / 100)
+
+    stop_distance = target_distance * (
+        abs(STOP_LOSS_PERCENT) / 100
+    )
 
     if direction == "BUY":
         stop_price = entry_price - stop_distance
@@ -164,7 +201,12 @@ def calculate_broker_stop_price(pair, direction, entry_price):
 
 def place_live_order(pair, direction, entry_price):
     units = TRADE_UNITS if direction == "BUY" else -TRADE_UNITS
-    stop_price = calculate_broker_stop_price(pair, direction, entry_price)
+
+    stop_price = calculate_broker_stop_price(
+        pair,
+        direction,
+        entry_price
+    )
 
     url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/orders"
 
@@ -181,7 +223,12 @@ def place_live_order(pair, direction, entry_price):
         }
     }
 
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=15)
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json=payload,
+        timeout=15
+    )
 
     if response.status_code not in [200, 201]:
         send_telegram(
@@ -192,6 +239,7 @@ def place_live_order(pair, direction, entry_price):
             f"Broker SL: {stop_price}\n"
             f"Error: {response.text}"
         )
+
         return None
 
     return {
@@ -216,7 +264,12 @@ def close_live_order(trade):
         }
     }
 
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=15)
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json=payload,
+        timeout=15
+    )
 
     if response.status_code not in [200, 201]:
         send_telegram(
@@ -224,6 +277,7 @@ def close_live_order(trade):
             f"Pair: {trade['pair']}\n"
             f"Error: {response.text}"
         )
+
         return False
 
     return True
@@ -237,7 +291,12 @@ def get_open_positions_map():
 
     try:
         url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/openPositions"
-        response = requests.get(url, headers=HEADERS, timeout=15)
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=15
+        )
 
         if response.status_code != 200:
             print("OPEN POSITIONS ERROR:", response.text)
@@ -280,6 +339,7 @@ def sync_existing_positions():
 
     for pair, position in open_positions.items():
         if pair not in active_trades and pair in PAIRS:
+
             active_trades[pair] = {
                 "pair": pair,
                 "direction": position["direction"],
@@ -294,7 +354,8 @@ def sync_existing_positions():
                 "broker_stop_price": "Existing position"
             }
 
-            send_telegram(f"""
+            send_telegram(
+                f"""
 🔄 EXISTING LIVE POSITION SYNCED
 
 Pair: {pair}
@@ -303,31 +364,47 @@ Units: {position['units']}
 Entry: {position['entry']}
 
 Bot will manage this open trade.
-""")
+"""
+            )
 
     for pair in list(active_trades.keys()):
         if pair not in open_positions and LIVE_TRADING:
-            send_telegram(f"""
-ℹ️ POSITION NO LONGER OPEN AT BROKER
-
-Pair: {pair}
-
-Removed from bot tracking.
-""")
             del active_trades[pair]
 
 
 def add_indicators(df):
-    df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
-    df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["ema9"] = df["close"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    df["ema21"] = df["close"].ewm(
+        span=21,
+        adjust=False
+    ).mean()
+
+    df["ema50"] = df["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
 
     df["avg_volume"] = df["volume"].rolling(20).mean()
-    df["volume_spike"] = df["volume"] > df["avg_volume"] * 1.10
 
-    df["candle_body"] = abs(df["close"] - df["open"])
-    df["range"] = df["high"] - df["low"]
-    df["strong_candle"] = df["candle_body"] > df["range"] * 0.45
+    df["volume_spike"] = (
+        df["volume"] > df["avg_volume"] * 1.10
+    )
+
+    df["candle_body"] = abs(
+        df["close"] - df["open"]
+    )
+
+    df["range"] = (
+        df["high"] - df["low"]
+    )
+
+    df["strong_candle"] = (
+        df["candle_body"] > df["range"] * 0.45
+    )
 
     return df
 
@@ -370,7 +447,9 @@ def score_trade(df, pair):
     if last["strong_candle"]:
         score += 20
 
-    if abs(last["ema9"] - last["ema21"]) > abs(prev["ema9"] - prev["ema21"]):
+    if abs(last["ema9"] - last["ema21"]) > abs(
+        prev["ema9"] - prev["ema21"]
+    ):
         score += 15
 
     if "JPY" in pair:
@@ -393,10 +472,13 @@ def can_open_trade(pair):
     new_currencies = currencies_in_pair(pair)
 
     for active_pair in active_trades.keys():
-        active_currencies = currencies_in_pair(active_pair)
+        active_currencies = currencies_in_pair(
+            active_pair
+        )
 
         for currency in new_currencies:
             if currency in active_currencies:
+
                 count = sum(
                     currency in currencies_in_pair(p)
                     for p in active_trades.keys()
@@ -417,7 +499,10 @@ def is_in_cooldown():
     now = datetime.now(timezone.utc)
 
     if now >= cooldown_until:
-        send_telegram("✅ Cooldown finished. Bot can open new trades again.")
+        send_telegram(
+            "✅ Cooldown finished. Bot can open new trades again."
+        )
+
         cooldown_until = None
         return False
 
@@ -425,12 +510,16 @@ def is_in_cooldown():
 
 
 def register_stop_loss():
-    global cooldown_until, recent_stop_losses
+    global cooldown_until
+    global recent_stop_losses
 
     now = datetime.now(timezone.utc)
+
     recent_stop_losses.append(now)
 
-    cutoff = now - timedelta(minutes=STOP_LOSS_WINDOW_MINUTES)
+    cutoff = now - timedelta(
+        minutes=STOP_LOSS_WINDOW_MINUTES
+    )
 
     recent_stop_losses = [
         t for t in recent_stop_losses
@@ -438,17 +527,27 @@ def register_stop_loss():
     ]
 
     if len(recent_stop_losses) >= STOP_LOSS_LIMIT_IN_WINDOW:
-        cooldown_until = now + timedelta(minutes=COOLDOWN_MINUTES)
+
+        cooldown_until = now + timedelta(
+            minutes=COOLDOWN_MINUTES
+        )
+
         recent_stop_losses = []
 
-        send_telegram(f"""
+        send_telegram(
+            f"""
 🧊 COOLDOWN ACTIVATED
 
-Reason: {STOP_LOSS_LIMIT_IN_WINDOW} stop losses within {STOP_LOSS_WINDOW_MINUTES} minutes.
+Reason:
+{STOP_LOSS_LIMIT_IN_WINDOW} stop losses within
+{STOP_LOSS_WINDOW_MINUTES} minutes.
 
-New entries paused for {COOLDOWN_MINUTES} minutes.
-Existing trades will still be managed.
-""")
+New entries paused for
+{COOLDOWN_MINUTES} minutes.
+
+Existing trades still managed.
+"""
+        )
 
 
 def open_trade(pair, direction, entry_price, score):
@@ -457,13 +556,19 @@ def open_trade(pair, direction, entry_price, score):
     broker_stop_price = None
 
     if LIVE_TRADING:
-        live_result = place_live_order(pair, direction, entry_price)
+        live_result = place_live_order(
+            pair,
+            direction,
+            entry_price
+        )
 
         if live_result is None:
             return
 
         units = live_result["units"]
-        broker_stop_price = live_result["broker_stop_price"]
+        broker_stop_price = live_result[
+            "broker_stop_price"
+        ]
 
     active_trades[pair] = {
         "pair": pair,
@@ -479,40 +584,51 @@ def open_trade(pair, direction, entry_price, score):
         "broker_stop_price": broker_stop_price
     }
 
-    mode = "LIVE TRADE OPENED" if LIVE_TRADING else "PAPER TRADE OPENED"
-
-    send_telegram(f"""
-🚀 {mode}
+    send_telegram(
+        f"""
+🚀 LIVE TRADE OPENED
 
 Pair: {pair}
 Direction: {direction}
-Units: {TRADE_UNITS if LIVE_TRADING else "Paper"}
+Units: {TRADE_UNITS}
 
 Entry: {entry_price}
 Score: {score}
-Broker Emergency SL: {broker_stop_price}
 
-🛑 Bot Stop Loss: {STOP_LOSS_PERCENT}%
-🔒 Profit Protection Starts: +{PROFIT_PROTECTION_TRIGGER}%
-📈 Dynamic Lock: Highest Profit - {TRAILING_PROFIT_GIVEBACK}%
-""")
+Broker Emergency SL:
+{broker_stop_price}
+"""
+    )
 
 
 def calculate_tp_progress(trade, current_price):
     entry = trade["entry"]
     direction = trade["direction"]
-    target_distance = get_target_distance(trade["pair"])
+
+    target_distance = get_target_distance(
+        trade["pair"]
+    )
 
     if direction == "BUY":
-        progress = ((current_price - entry) / target_distance) * 100
+        progress = (
+            (current_price - entry)
+            / target_distance
+        ) * 100
+
     else:
-        progress = ((entry - current_price) / target_distance) * 100
+        progress = (
+            (entry - current_price)
+            / target_distance
+        ) * 100
 
     return round(progress, 2)
 
 
 def calculate_protected_exit(highest_progress):
-    protected_exit = highest_progress - TRAILING_PROFIT_GIVEBACK
+    protected_exit = (
+        highest_progress
+        - TRAILING_PROFIT_GIVEBACK
+    )
 
     if protected_exit < MIN_PROTECTED_EXIT:
         protected_exit = MIN_PROTECTED_EXIT
@@ -532,10 +648,9 @@ def close_trade(pair, reason, current_price, progress):
         if not closed:
             return
 
-    mode = "LIVE TRADE CLOSED" if LIVE_TRADING else "PAPER TRADE CLOSED"
-
-    send_telegram(f"""
-✅ {mode}
+    send_telegram(
+        f"""
+✅ LIVE TRADE CLOSED
 
 Pair: {pair}
 Direction: {trade['direction']}
@@ -544,12 +659,16 @@ Entry: {trade['entry']}
 Exit: {current_price}
 
 Final Progress: {progress}%
-Highest Progress: {trade['highest_progress']}%
-Protected Exit: {trade.get('protected_exit')}
-Broker Emergency SL: {trade.get('broker_stop_price')}
+Highest Progress:
+{trade['highest_progress']}%
 
-Reason: {reason}
-""")
+Protected Exit:
+{trade.get('protected_exit')}
+
+Reason:
+{reason}
+"""
+    )
 
     del active_trades[pair]
 
@@ -563,179 +682,197 @@ def manage_open_trades():
 
     for pair in list(active_trades.keys()):
         trade = active_trades[pair]
+
         df = get_candles(pair)
 
         if df.empty:
             continue
 
-        current_price = float(df.iloc[-1]["close"])
-        progress = calculate_tp_progress(trade, current_price)
+        current_price = float(
+            df.iloc[-1]["close"]
+        )
+
+        progress = calculate_tp_progress(
+            trade,
+            current_price
+        )
 
         if progress > trade["highest_progress"]:
             trade["highest_progress"] = progress
 
         if progress <= STOP_LOSS_PERCENT:
-            close_trade(pair, "🛑 BOT STOP LOSS HIT", current_price, progress)
+            close_trade(
+                pair,
+                "🛑 BOT STOP LOSS HIT",
+                current_price,
+                progress
+            )
             continue
 
-        if progress >= PROFIT_PROTECTION_TRIGGER and not trade["profit_protection"]:
-            trade["profit_protection"] = True
-            trade["protected_exit"] = calculate_protected_exit(trade["highest_progress"])
+        if (
+            progress >= PROFIT_PROTECTION_TRIGGER
+            and not trade["profit_protection"]
+        ):
 
-            send_telegram(f"""
+            trade["profit_protection"] = True
+
+            trade["protected_exit"] = (
+                calculate_protected_exit(
+                    trade["highest_progress"]
+                )
+            )
+
+            send_telegram(
+                f"""
 🔒 PROFIT PROTECTION ACTIVATED
 
 Pair: {pair}
 Direction: {trade['direction']}
 
-Current Progress: {progress}%
-Highest Progress: {trade['highest_progress']}%
-Protected Exit: {trade['protected_exit']}%
-""")
+Current Progress:
+{progress}%
+
+Protected Exit:
+{trade['protected_exit']}%
+"""
+            )
 
         if trade["profit_protection"]:
-            new_protected_exit = calculate_protected_exit(trade["highest_progress"])
 
-            if trade["protected_exit"] is None or new_protected_exit > trade["protected_exit"]:
-                trade["protected_exit"] = new_protected_exit
+            new_protected_exit = (
+                calculate_protected_exit(
+                    trade["highest_progress"]
+                )
+            )
 
-                send_telegram(f"""
-📈 TRAILING PROFIT LOCK MOVED UP
+            if (
+                trade["protected_exit"] is None
+                or new_protected_exit
+                > trade["protected_exit"]
+            ):
 
-Pair: {pair}
-Direction: {trade['direction']}
-
-Highest Progress: {trade['highest_progress']}%
-New Protected Exit: {trade['protected_exit']}%
-""")
+                trade["protected_exit"] = (
+                    new_protected_exit
+                )
 
             if progress <= trade["protected_exit"]:
-                close_trade(pair, "🔒 DYNAMIC PROFIT PROTECTED EXIT", current_price, progress)
+
+                close_trade(
+                    pair,
+                    "🔒 DYNAMIC PROFIT PROTECTED EXIT",
+                    current_price,
+                    progress
+                )
+
                 continue
-
-        status = "Moving toward profit ✅" if progress > 0 else "Moving against entry ⚠️"
-
-        send_telegram(f"""
-⏳ TRADE UPDATE
-
-Pair: {pair}
-Direction: {trade['direction']}
-
-Current Price: {current_price}
-
-TP Progress: {progress}%
-Highest Progress: {trade['highest_progress']}%
-
-Profit Protection: {trade['profit_protection']}
-Protected Exit: {trade.get('protected_exit')}
-Broker Emergency SL: {trade.get('broker_stop_price')}
-
-{status}
-""")
 
 
 def scan_market():
     if not within_trading_hours():
-        print("Outside trading hours. Managing existing trades only.")
+        print(
+            "Outside trading hours. Managing trades only."
+        )
         return
 
     if is_in_cooldown():
-        print("Cooldown active. Skipping new entries.")
+        print(
+            "Cooldown active. Skipping new entries."
+        )
         return
 
-    found_signal = False
-
     for pair in PAIRS:
+
         if not can_open_trade(pair):
-            print(f"Skipping {pair}: max trades or correlation")
             continue
 
         df = get_candles(pair)
 
         if df.empty:
-            print(f"No candle data for {pair}")
             continue
 
-        direction, score = score_trade(df, pair)
+        direction, score = score_trade(
+            df,
+            pair
+        )
 
-        print(f"{pair} | Direction: {direction} | Score: {score}")
+        print(
+            f"{pair} | Direction: {direction} | Score: {score}"
+        )
 
         if direction and score >= MIN_SCORE:
-            entry_price = float(df.iloc[-1]["close"])
-            open_trade(pair, direction, entry_price, score)
-            found_signal = True
-        else:
-            print(f"No trade for {pair}. Score too low.")
 
-    if not found_signal:
-        print("No clean setup yet.")
+            entry_price = float(
+                df.iloc[-1]["close"]
+            )
+
+            open_trade(
+                pair,
+                direction,
+                entry_price,
+                score
+            )
 
 
 def main():
-    send_telegram(f"""
+    send_telegram(
+        f"""
 🤖 FOREX BOT STARTED
 
-Mode: {"LIVE TRADING" if LIVE_TRADING else "PAPER TRADING"}
-Data Source: LIVE OANDA
+LIVE MODE ACTIVE
 
 Pairs:
 {", ".join(PAIRS)}
 
-Live Units: {TRADE_UNITS}
+Units:
+{TRADE_UNITS}
 
-Safety:
-✅ Broker-side emergency SL on NEW trades
-✅ Bot-managed stop/profit exits
-✅ Existing broker positions synced after restart
+Max Active Trades:
+{MAX_ACTIVE_TRADES}
 
-Risk Rules:
-🛑 Bot Stop Loss: {STOP_LOSS_PERCENT}%
-🔒 Profit Protection Starts: +{PROFIT_PROTECTION_TRIGGER}%
-📈 Dynamic Profit Lock: Highest Profit - {TRAILING_PROFIT_GIVEBACK}%
-🚪 Minimum Protected Exit: +{MIN_PROTECTED_EXIT}%
+Correlation Limit:
+{MAX_SAME_CURRENCY_TRADES}
 
-Cooldown:
-🧊 {STOP_LOSS_LIMIT_IN_WINDOW} stop losses in {STOP_LOSS_WINDOW_MINUTES} minutes
-→ pause new entries for {COOLDOWN_MINUTES} minutes
+Trading Window:
+Sunday 5PM ET
+Monday-Thursday 8PM-12PM ET
+Friday until 12PM ET
 
-Max Active Trades: {MAX_ACTIVE_TRADES}
-Max Same Currency Trades: {MAX_SAME_CURRENCY_TRADES}
-
-Entry Hours:
-Sunday from 5 PM Eastern
-Monday-Thursday 8 PM–12 PM Eastern
-Friday until 12 PM Eastern only
-
-Open trades managed 24/5.
-
-Weekend Filter: ON
-Scan Speed: Every {SCAN_SECONDS} seconds
-
-Bot is now scanning.
-""")
+Bot now scanning.
+"""
+    )
 
     sync_existing_positions()
 
     while True:
+
         try:
+
             sync_existing_positions()
 
             if market_is_closed():
-                print("Forex market closed. Waiting...")
+                print(
+                    "Forex market closed. Waiting..."
+                )
+
                 manage_open_trades()
+
                 time.sleep(300)
                 continue
 
-            print("Scanning market...")
-
             scan_market()
+
             manage_open_trades()
 
             time.sleep(SCAN_SECONDS)
 
         except Exception as e:
+
             print("Main Loop Error:", e)
-            send_telegram(f"⚠️ BOT ERROR: {e}")
+
+            send_telegram(
+                f"⚠️ BOT ERROR: {e}"
+            )
+
             time.sleep(60)
 
 
