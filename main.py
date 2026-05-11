@@ -12,14 +12,15 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 LIVE_TRADING = True
 TRADE_UNITS = 250
+
 PAIRS = [
     "EUR_USD",
     "GBP_USD",
     "USD_JPY",
     "EUR_JPY",
-    "AUD_USD"
+    "AUD_USD",
+    "CAD_JPY"
 ]
-
 
 TIMEFRAME = "M5"
 CANDLE_COUNT = 100
@@ -31,7 +32,8 @@ TRAILING_PROFIT_GIVEBACK = 10.0
 MIN_PROTECTED_EXIT = 15.0
 
 MAX_ACTIVE_TRADES = 3
-MAX_SAME_CURRENCY_TRADES = 1
+MAX_SAME_CURRENCY_TRADES = 3
+
 SCAN_SECONDS = 60
 
 STOP_LOSS_WINDOW_MINUTES = 15
@@ -39,11 +41,12 @@ STOP_LOSS_LIMIT_IN_WINDOW = 2
 COOLDOWN_MINUTES = 45
 
 TRADING_TIMEZONE = ZoneInfo("America/New_York")
-
 OANDA_URL = "https://api-fxtrade.oanda.com/v3"
 
+token = OANDA_API_KEY or ""
+
 HEADERS = {
-    "Authorization": OANDA_API_KEY if OANDA_API_KEY and OANDA_API_KEY.startswith("Bearer ") else f"Bearer {OANDA_API_KEY}",
+    "Authorization": token if token.startswith("Bearer ") else f"Bearer {token}",
     "Content-Type": "application/json"
 }
 
@@ -59,23 +62,27 @@ def send_telegram(message):
             return
 
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
         requests.post(
             url,
             data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
             timeout=10
         )
+
     except Exception as e:
         print("Telegram Error:", e)
 
 
 def market_is_closed():
-    now = datetime.now(timezone.utc)
+    now_et = datetime.now(TRADING_TIMEZONE)
 
-    if now.weekday() == 4 and now.hour >= 22:
+    if now_et.weekday() == 5:
         return True
-    if now.weekday() == 5:
+
+    if now_et.weekday() == 6 and now_et.hour < 17:
         return True
-    if now.weekday() == 6 and now.hour < 22:
+
+    if now_et.weekday() == 4 and now_et.hour >= 17:
         return True
 
     return False
@@ -84,14 +91,25 @@ def market_is_closed():
 def within_trading_hours():
     now_et = datetime.now(TRADING_TIMEZONE)
 
+    # Avoid rollover/choppy spread window: 5PM–8PM ET
+    if 17 <= now_et.hour < 20:
+        return False
+
+    # Saturday closed
+    if now_et.weekday() == 5:
+        return False
+
+    # Sunday: allow after 8PM ET only
     if now_et.weekday() == 6:
-        return now_et.hour >= 17
+        return now_et.hour >= 20
 
-    if now_et.weekday() in [0, 1, 2, 3]:
-        return now_et.hour >= 20 or now_et.hour < 12
-
+    # Friday: stop new entries after 12PM ET
     if now_et.weekday() == 4:
         return now_et.hour < 12
+
+    # Monday-Thursday: allow all day except 5PM–8PM ET
+    if now_et.weekday() in [0, 1, 2, 3]:
+        return True
 
     return False
 
@@ -99,13 +117,19 @@ def within_trading_hours():
 def get_candles(pair):
     try:
         url = f"{OANDA_URL}/instruments/{pair}/candles"
+
         params = {
             "granularity": TIMEFRAME,
             "count": CANDLE_COUNT,
             "price": "M"
         }
 
-        response = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            params=params,
+            timeout=15
+        )
 
         print(f"{pair} STATUS:", response.status_code)
 
@@ -113,10 +137,9 @@ def get_candles(pair):
             print(f"OANDA ERROR for {pair}: {response.text}")
             return pd.DataFrame()
 
-        data = response.json()
         candles = []
 
-        for candle in data.get("candles", []):
+        for candle in response.json().get("candles", []):
             if candle.get("complete"):
                 candles.append({
                     "time": candle["time"],
@@ -130,13 +153,14 @@ def get_candles(pair):
         return pd.DataFrame(candles)
 
     except Exception as e:
-        print(f"Error loading candles for {pair}:", e)
+        print(f"{pair} candle error:", e)
         return pd.DataFrame()
 
 
 def get_target_distance(pair):
     if "JPY" in pair:
         return 0.30
+
     return 0.0030
 
 
@@ -145,11 +169,16 @@ def get_open_positions_map():
 
     try:
         url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/openPositions"
-        response = requests.get(url, headers=HEADERS, timeout=15)
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=15
+        )
 
         if response.status_code != 200:
             print("OPEN POSITIONS ERROR:", response.text)
-            return positions
+            return None
 
         data = response.json()
 
@@ -176,12 +205,15 @@ def get_open_positions_map():
         return positions
 
     except Exception as e:
-        print("Open positions sync error:", e)
-        return positions
+        print("Open positions error:", e)
+        return None
 
 
 def sync_existing_positions():
     open_positions = get_open_positions_map()
+
+    if open_positions is None:
+        return
 
     for pair, position in open_positions.items():
         if pair in PAIRS and pair not in active_trades:
@@ -196,17 +228,6 @@ def sync_existing_positions():
                 "protected_exit": None,
                 "units": position["units"]
             }
-
-            send_telegram(f"""
-🔄 EXISTING LIVE POSITION SYNCED
-
-Pair: {pair}
-Direction: {position['direction']}
-Units: {position['units']}
-Entry: {position['entry']}
-
-Bot will manage this trade.
-""")
 
     for pair in list(active_trades.keys()):
         if pair not in open_positions:
@@ -228,7 +249,12 @@ def place_live_order(pair, direction, entry_price):
         }
     }
 
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=15)
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json=payload,
+        timeout=15
+    )
 
     if response.status_code not in [200, 201]:
         send_telegram(f"""
@@ -264,7 +290,12 @@ def close_live_order(trade):
         }
     }
 
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=15)
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json=payload,
+        timeout=15
+    )
 
     if response.status_code not in [200, 201]:
         send_telegram(f"""
@@ -280,6 +311,17 @@ Error:
     time.sleep(2)
 
     open_positions = get_open_positions_map()
+
+    if open_positions is None:
+        send_telegram(f"""
+⚠️ CLOSE CHECK FAILED
+
+Pair: {trade['pair']}
+
+Could not verify with OANDA.
+Bot will keep managing this trade.
+""")
+        return False
 
     if trade["pair"] in open_positions:
         send_telegram(f"""
@@ -368,21 +410,6 @@ def can_open_trade(pair):
     if len(active_trades) >= MAX_ACTIVE_TRADES:
         return False
 
-    new_currencies = currencies_in_pair(pair)
-
-    for active_pair in active_trades.keys():
-        active_currencies = currencies_in_pair(active_pair)
-
-        for currency in new_currencies:
-            if currency in active_currencies:
-                count = sum(
-                    currency in currencies_in_pair(p)
-                    for p in active_trades.keys()
-                )
-
-                if count >= MAX_SAME_CURRENCY_TRADES:
-                    return False
-
     return True
 
 
@@ -422,7 +449,7 @@ def register_stop_loss():
         send_telegram(f"""
 🧊 COOLDOWN ACTIVATED
 
-Reason: {STOP_LOSS_LIMIT_IN_WINDOW} stop losses within {STOP_LOSS_WINDOW_MINUTES} minutes.
+Reason: {STOP_LOSS_LIMIT_IN_WINDOW} losses within {STOP_LOSS_WINDOW_MINUTES} minutes.
 
 New entries paused for {COOLDOWN_MINUTES} minutes.
 Existing trades still managed.
@@ -457,7 +484,7 @@ Units: {TRADE_UNITS}
 Entry: {entry_price}
 Score: {score}
 
-Broker SL: Removed
+Max Trades: {MAX_ACTIVE_TRADES}
 Bot Stop Loss: {STOP_LOSS_PERCENT}%
 Profit Protection Starts: +{PROFIT_PROTECTION_TRIGGER}%
 """)
@@ -496,8 +523,12 @@ def close_trade(pair, reason, current_price, progress):
     if not closed:
         return
 
+    result = "PROFIT" if progress > 0 else "LOSS"
+
     send_telegram(f"""
 ✅ LIVE TRADE CLOSED
+
+Result: {result}
 
 Pair: {pair}
 Direction: {trade['direction']}
@@ -515,7 +546,7 @@ Reason:
 
     del active_trades[pair]
 
-    if "STOP LOSS" in reason:
+    if progress <= 0 or "STOP LOSS" in reason:
         register_stop_loss()
 
 
@@ -545,55 +576,15 @@ def manage_open_trades():
             trade["profit_protection"] = True
             trade["protected_exit"] = calculate_protected_exit(trade["highest_progress"])
 
-            send_telegram(f"""
-🔒 PROFIT PROTECTION ACTIVATED
-
-Pair: {pair}
-Direction: {trade['direction']}
-
-Current Progress: {progress}%
-Highest Progress: {trade['highest_progress']}%
-Protected Exit: {trade['protected_exit']}%
-""")
-
         if trade["profit_protection"]:
             new_protected_exit = calculate_protected_exit(trade["highest_progress"])
 
             if trade["protected_exit"] is None or new_protected_exit > trade["protected_exit"]:
                 trade["protected_exit"] = new_protected_exit
 
-                send_telegram(f"""
-📈 TRAILING PROFIT LOCK MOVED UP
-
-Pair: {pair}
-Direction: {trade['direction']}
-
-Highest Progress: {trade['highest_progress']}%
-New Protected Exit: {trade['protected_exit']}%
-""")
-
             if progress <= trade["protected_exit"]:
                 close_trade(pair, "🔒 DYNAMIC PROFIT PROTECTED EXIT", current_price, progress)
                 continue
-
-        status = "Moving toward profit ✅" if progress > 0 else "Moving against entry ⚠️"
-
-        send_telegram(f"""
-⏳ TRADE UPDATE
-
-Pair: {pair}
-Direction: {trade['direction']}
-
-Current Price: {current_price}
-
-TP Progress: {progress}%
-Highest Progress: {trade['highest_progress']}%
-
-Profit Protection: {trade['profit_protection']}
-Protected Exit: {trade.get('protected_exit')}
-
-{status}
-""")
 
 
 def scan_market():
@@ -634,19 +625,21 @@ Pairs:
 
 Units: {TRADE_UNITS}
 
-Broker-side SL: REMOVED
-Bot-managed Stop Loss: {STOP_LOSS_PERCENT}%
+Telegram Alerts:
+Entry only
+Exit only
+Cooldown/errors only
 
-Profit Protection Starts: +{PROFIT_PROTECTION_TRIGGER}%
-Trailing Lock: Highest Profit - {TRAILING_PROFIT_GIVEBACK}%
+Trading:
+Runs most of the day
+Avoids 5PM–8PM ET rollover/choppy hours
 
 Max Active Trades: {MAX_ACTIVE_TRADES}
-Correlation Limit: {MAX_SAME_CURRENCY_TRADES}
+Correlation: Allowed
 
-Trading Window:
-Sunday 5PM ET
-Monday-Thursday 8PM-12PM ET
-Friday until 12PM ET
+Bot-managed Stop Loss: {STOP_LOSS_PERCENT}%
+Profit Protection Starts: +{PROFIT_PROTECTION_TRIGGER}%
+Trailing Lock: Highest Profit - {TRAILING_PROFIT_GIVEBACK}%
 
 Bot now scanning.
 """)
@@ -659,7 +652,6 @@ Bot now scanning.
 
             if market_is_closed():
                 print("Forex market closed. Waiting...")
-                manage_open_trades()
                 time.sleep(300)
                 continue
 
