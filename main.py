@@ -12,12 +12,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 LIVE_TRADING = True
 TRADE_UNITS = 250
-
 PAIRS = [
-    "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "USD_CAD", "AUD_USD",
-    "GBP_JPY", "EUR_JPY", "GBP_CAD", "GBP_CHF", "AUD_JPY", "CAD_JPY", "NZD_JPY",
-    "EUR_GBP", "EUR_AUD", "GBP_AUD"
+    "EUR_USD",
+    "GBP_USD",
+    "USD_JPY",
+    "EUR_JPY",
+    "AUD_USD"
 ]
+
 
 TIMEFRAME = "M5"
 CANDLE_COUNT = 100
