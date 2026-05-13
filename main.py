@@ -258,7 +258,7 @@ def place_live_order(pair, direction, entry_price):
             "type": "MARKET",
             "instrument": pair,
             "units": str(units),
-            "timeInForce": "FOK",
+            "timeInForce": "IOC",
             "positionFill": "DEFAULT"
         }
     }
