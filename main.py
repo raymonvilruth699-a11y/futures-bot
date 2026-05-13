@@ -11,7 +11,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 LIVE_TRADING = True
-TRADE_UNITS = 1000
+TRADE_UNITS = 250
 
 PAIRS = [
     "EUR_USD",
@@ -27,18 +27,17 @@ CANDLE_COUNT = 100
 MIN_SCORE = 65
 
 STOP_LOSS_PERCENT = -30.0
-PROFIT_PROTECTION_TRIGGER = 8
+PROFIT_PROTECTION_TRIGGER = 8.0
 TRAILING_PROFIT_GIVEBACK = 10.0
-MIN_PROTECTED_EXIT = 8
+MIN_PROTECTED_EXIT = 8.0
 
 MAX_ACTIVE_TRADES = 3
-MAX_SAME_CURRENCY_TRADES = 3
-
 SCAN_SECONDS = 10
 
 STOP_LOSS_WINDOW_MINUTES = 15
 STOP_LOSS_LIMIT_IN_WINDOW = 2
 COOLDOWN_MINUTES = 45
+FAILED_ENTRY_BLOCK_MINUTES = 10
 
 TRADING_TIMEZONE = ZoneInfo("America/New_York")
 OANDA_URL = "https://api-fxtrade.oanda.com/v3"
@@ -53,6 +52,7 @@ HEADERS = {
 active_trades = {}
 recent_stop_losses = []
 cooldown_until = None
+blocked_entries = {}
 
 
 def send_telegram(message):
@@ -91,23 +91,18 @@ def market_is_closed():
 def within_trading_hours():
     now_et = datetime.now(TRADING_TIMEZONE)
 
-    # Avoid rollover/choppy spread window: 5PM–8PM ET
     if 17 <= now_et.hour < 20:
         return False
 
-    # Saturday closed
     if now_et.weekday() == 5:
         return False
 
-    # Sunday: allow after 8PM ET only
     if now_et.weekday() == 6:
         return now_et.hour >= 20
 
-    # Friday: stop new entries after 12PM ET
     if now_et.weekday() == 4:
         return now_et.hour < 12
 
-    # Monday-Thursday: allow all day except 5PM–8PM ET
     if now_et.weekday() in [0, 1, 2, 3]:
         return True
 
@@ -234,6 +229,25 @@ def sync_existing_positions():
             del active_trades[pair]
 
 
+def block_failed_entry(pair):
+    blocked_entries[pair] = datetime.now(timezone.utc) + timedelta(
+        minutes=FAILED_ENTRY_BLOCK_MINUTES
+    )
+
+
+def is_entry_blocked(pair):
+    if pair not in blocked_entries:
+        return False
+
+    now = datetime.now(timezone.utc)
+
+    if now >= blocked_entries[pair]:
+        del blocked_entries[pair]
+        return False
+
+    return True
+
+
 def place_live_order(pair, direction, entry_price):
     units = TRADE_UNITS if direction == "BUY" else -TRADE_UNITS
 
@@ -257,6 +271,8 @@ def place_live_order(pair, direction, entry_price):
     )
 
     if response.status_code not in [200, 201]:
+        block_failed_entry(pair)
+
         send_telegram(f"""
 ⚠️ LIVE ORDER FAILED
 
@@ -264,14 +280,54 @@ Pair: {pair}
 Direction: {direction}
 Units: {units}
 
+Pair blocked for {FAILED_ENTRY_BLOCK_MINUTES} minutes.
+
 Error:
 {response.text}
 """)
         return None
 
+    data = response.json()
+
+    if "orderFillTransaction" not in data:
+        block_failed_entry(pair)
+
+        send_telegram(f"""
+⚠️ ORDER NOT FILLED
+
+Pair: {pair}
+Direction: {direction}
+
+OANDA did not confirm a filled trade.
+Bot will NOT mark this as open.
+
+Pair blocked for {FAILED_ENTRY_BLOCK_MINUTES} minutes.
+""")
+        return None
+
+    time.sleep(2)
+
+    open_positions = get_open_positions_map()
+
+    if open_positions is None or pair not in open_positions:
+        block_failed_entry(pair)
+
+        send_telegram(f"""
+⚠️ ORDER NOT CONFIRMED AT BROKER
+
+Pair: {pair}
+
+OANDA did not show this position open.
+Bot will NOT mark this as a live trade.
+
+Pair blocked for {FAILED_ENTRY_BLOCK_MINUTES} minutes.
+""")
+        return None
+
     return {
-        "units": units,
-        "response": response.json()
+        "units": open_positions[pair]["units"],
+        "entry": open_positions[pair]["entry"],
+        "response": data
     }
 
 
@@ -399,12 +455,11 @@ def score_trade(df, pair):
     return direction, score
 
 
-def currencies_in_pair(pair):
-    return pair.split("_")
-
-
 def can_open_trade(pair):
     if pair in active_trades:
+        return False
+
+    if is_entry_blocked(pair):
         return False
 
     if len(active_trades) >= MAX_ACTIVE_TRADES:
@@ -457,6 +512,9 @@ Existing trades still managed.
 
 
 def open_trade(pair, direction, entry_price, score):
+    if pair in active_trades:
+        return
+
     live_result = place_live_order(pair, direction, entry_price)
 
     if live_result is None:
@@ -465,7 +523,7 @@ def open_trade(pair, direction, entry_price, score):
     active_trades[pair] = {
         "pair": pair,
         "direction": direction,
-        "entry": entry_price,
+        "entry": live_result["entry"],
         "score": score,
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "profit_protection": False,
@@ -479,9 +537,9 @@ def open_trade(pair, direction, entry_price, score):
 
 Pair: {pair}
 Direction: {direction}
-Units: {TRADE_UNITS}
+Units: {live_result["units"]}
 
-Entry: {entry_price}
+Entry: {live_result["entry"]}
 Score: {score}
 
 Max Trades: {MAX_ACTIVE_TRADES}
@@ -626,8 +684,8 @@ Pairs:
 Units: {TRADE_UNITS}
 
 Telegram Alerts:
-Entry only
-Exit only
+Entry only after OANDA confirms position
+Exit only after OANDA confirms close
 Cooldown/errors only
 
 Trading:
@@ -640,6 +698,8 @@ Correlation: Allowed
 Bot-managed Stop Loss: {STOP_LOSS_PERCENT}%
 Profit Protection Starts: +{PROFIT_PROTECTION_TRIGGER}%
 Trailing Lock: Highest Profit - {TRAILING_PROFIT_GIVEBACK}%
+
+Scan Speed: Every {SCAN_SECONDS} seconds
 
 Bot now scanning.
 """)
