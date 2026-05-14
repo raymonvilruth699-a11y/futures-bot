@@ -19,7 +19,8 @@ PAIRS = [
     "USD_JPY",
     "EUR_JPY",
     "AUD_USD",
-    "CAD_JPY"
+    "CAD_JPY",
+    "XAU_USD",
 ]
 
 TIMEFRAME = "M5"
